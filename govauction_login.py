@@ -489,7 +489,11 @@ class AuctionQueueEngine:
         """
         with self.lock:
             self.update_statuses_locked()
-            cards = list(self.master_auctions.values())
+            cards = []
+            for aid, rec in self.master_auctions.items():
+                c = dict(rec)
+                c["discoveryIndex"] = self.discovery_order.index(aid) if aid in self.discovery_order else 0
+                cards.append(c)
 
         if search:
             s = search.lower().strip()
@@ -507,18 +511,29 @@ class AuctionQueueEngine:
             cards.sort(key=lambda c: c.get("highestBid", 0.0), reverse=True)
         elif sort_by == "bidders":
             cards.sort(key=lambda c: len(c.get("bidders", [])), reverse=True)
-        elif sort_by == "last_checked":
-            cards.sort(key=lambda c: c.get("lastCheckedTime", 0.0), reverse=True)
+        elif sort_by == "active":
+            status_order = {"active": 0, "queued": 1, "recently_checked": 2, "waiting": 3}
+            cards.sort(key=lambda c: (status_order.get(c.get("status"), 4), c.get("activeSlot") or 99))
+        elif sort_by == "newest_discovered":
+            idx_map = {aid: i for i, aid in enumerate(self.discovery_order)}
+            cards.sort(key=lambda c: idx_map.get(c.get("auctionId"), 0), reverse=True)
         elif sort_by == "auction_id":
             cards.sort(key=lambda c: c.get("auctionId", ""))
         else:
-            # Default sorting: ACTIVE first, then QUEUED, then RECENTLY CHECKED, then WAITING
-            status_order = {"active": 0, "queued": 1, "recently_checked": 2, "waiting": 3}
-            cards.sort(key=lambda c: (
-                status_order.get(c.get("status"), 4),
-                c.get("activeSlot") or 99,
-                -c.get("lastCheckedTime", 0.0)
-            ))
+            # Default sorting: Recently Checked / Updated First!
+            # Checked items appear first. When an item is checked or receives a new bid,
+            # its event timestamp updates and it floats to the very first position.
+            def sort_key(c):
+                checked = 1 if (c.get("lastCheckedTime", 0) > 0 or len(c.get("bidders", [])) > 0 or c.get("highestBid", 0) > 0) else 0
+                event_time = max(c.get("lastCheckedTime", 0.0), c.get("lastBidChangeTime", 0.0))
+                disc_idx = self.discovery_order.index(c.get("auctionId")) if c.get("auctionId") in self.discovery_order else 0
+                return (
+                    checked,
+                    event_time,
+                    c.get("highestBid", 0.0),
+                    -disc_idx
+                )
+            cards.sort(key=sort_key, reverse=True)
 
         return cards
 

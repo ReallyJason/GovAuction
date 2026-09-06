@@ -888,10 +888,11 @@
       <div class="sort-control">
         <label for="sort-select">Sort:</label>
         <select id="sort-select" class="sort-select" onchange="onSortChange()">
-          <option value="status">Status (Active First)</option>
+          <option value="recent">⚡ Recently Checked / Updated (Default)</option>
           <option value="bid_high">Highest Bid ($ High to Low)</option>
           <option value="bidders">Most Bidders</option>
-          <option value="last_checked">Last Checked (Most Recent)</option>
+          <option value="active">Active Browser Tabs</option>
+          <option value="newest_discovered">Newest Discovered</option>
           <option value="auction_id">Auction ID</option>
         </select>
       </div>
@@ -931,7 +932,7 @@
     let masterAuctions = [];
     let currentFilter = 'all';
     let searchQuery = '';
-    let currentSort = 'status';
+    let currentSort = 'recent';
     let currentPage = 1;
     const pageSize = 24;
 
@@ -1021,19 +1022,35 @@
         list.sort((a, b) => (Number(b.highestBid) || 0) - (Number(a.highestBid) || 0));
       } else if (currentSort === 'bidders') {
         list.sort((a, b) => ((b.bidders && b.bidders.length) || 0) - ((a.bidders && a.bidders.length) || 0));
-      } else if (currentSort === 'last_checked') {
-        list.sort((a, b) => (b.lastCheckedTime || 0) - (a.lastCheckedTime || 0));
-      } else if (currentSort === 'auction_id') {
-        list.sort((a, b) => String(a.auctionId).localeCompare(String(b.auctionId)));
-      } else {
-        // Default: active first, then queued, then recently_checked, then waiting
+      } else if (currentSort === 'active') {
         const statusOrder = { active: 0, queued: 1, recently_checked: 2, waiting: 3 };
         list.sort((a, b) => {
           const sa = statusOrder[a.status] !== undefined ? statusOrder[a.status] : 4;
           const sb = statusOrder[b.status] !== undefined ? statusOrder[b.status] : 4;
           if (sa !== sb) return sa - sb;
-          if (a.activeSlot && b.activeSlot) return a.activeSlot - b.activeSlot;
-          return (b.lastCheckedTime || 0) - (a.lastCheckedTime || 0);
+          return (a.activeSlot || 99) - (b.activeSlot || 99);
+        });
+      } else if (currentSort === 'newest_discovered') {
+        list.sort((a, b) => (b.discoveryIndex || 0) - (a.discoveryIndex || 0));
+      } else if (currentSort === 'auction_id') {
+        list.sort((a, b) => String(a.auctionId || a.id).localeCompare(String(b.auctionId || b.id)));
+      } else {
+        // 'recent' (Default):
+        // Checked items appear first!
+        // When an item is checked or receives a new bid, it updates its timestamp and floats to #1.
+        // Unchecked items wait below checked items until they are actually checked.
+        list.sort((a, b) => {
+          const aChecked = (a.lastCheckedTime > 0 || (a.bidders && a.bidders.length > 0) || (a.highestBid && a.highestBid > 0)) ? 1 : 0;
+          const bChecked = (b.lastCheckedTime > 0 || (b.bidders && b.bidders.length > 0) || (b.highestBid && b.highestBid > 0)) ? 1 : 0;
+          if (aChecked !== bChecked) {
+            return bChecked - aChecked; // 1 (checked) before 0 (unchecked)
+          }
+          const aTime = Math.max(a.lastCheckedTime || 0, a.lastBidChangeTime || 0);
+          const bTime = Math.max(b.lastCheckedTime || 0, b.lastBidChangeTime || 0);
+          if (bTime !== aTime) {
+            return bTime - aTime; // newest checked / updated time first
+          }
+          return (Number(b.highestBid) || 0) - (Number(a.highestBid) || 0);
         });
       }
 
@@ -1132,8 +1149,8 @@
           card = document.createElement('div');
           card.className = 'auction-card';
           card.id = `card-${aid}`;
-          grid.appendChild(card);
         }
+        grid.appendChild(card);
 
         // Bidders list markup
         let biddersHtml = '';
