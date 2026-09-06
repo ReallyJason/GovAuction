@@ -152,7 +152,8 @@ class AuctionQueueEngine:
                             "lastBidChangeTime": 0.0,
                             "activityScore": 0,
                             "checkCount": 0,
-                            "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}"
+                            "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}",
+                            "battleUrl": f"https://www.govauctions.com/battle/{aid}"
                         }
 
                     discovered_ids.append(aid)
@@ -183,7 +184,8 @@ class AuctionQueueEngine:
                                 "lastBidChangeTime": 0.0,
                                 "activityScore": 0,
                                 "checkCount": 0,
-                                "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={q_id}&auctionDetailsIds={q_id}"
+                                "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={q_id}&auctionDetailsIds={q_id}",
+                                "battleUrl": f"https://www.govauctions.com/battle/{q_id}"
                             }
 
             new_count = 0
@@ -339,7 +341,8 @@ class AuctionQueueEngine:
                     "lastBidChangeTime": 0.0,
                     "activityScore": 0,
                     "checkCount": 0,
-                    "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}"
+                    "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}",
+                    "battleUrl": f"https://www.govauctions.com/battle/{aid}"
                 }
 
             record = self.master_auctions[aid]

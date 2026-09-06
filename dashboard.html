@@ -710,6 +710,28 @@
       font-weight: 500;
     }
 
+    .card-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+    }
+
+    .battle-link {
+      color: var(--accent-green);
+      text-decoration: none;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      transition: color 0.2s, text-shadow 0.2s;
+    }
+
+    .battle-link:hover {
+      color: #34d399;
+      text-decoration: underline;
+      text-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+    }
+
     .gonzales-link {
       color: var(--accent-cyan);
       text-decoration: none;
@@ -1126,7 +1148,7 @@
           : (auction.primaryImage ? [auction.primaryImage] : (auction.image ? [auction.image] : []));
         const primaryImage = auction.primaryImage || images[0] || '';
         const lastChecked = auction.lastChecked || 'Waiting...';
-        const lastUpdated = auction.lastUpdated || 'Never';
+        const battleUrl = auction.battleUrl || `https://www.govauctions.com/battle/${aid}`;
         const gonzalesUrl = auction.gonzalesUrl || `https://www.govauctions.com/gonzales.php?idlist=${aid}&auctionDetailsIds=${aid}`;
 
         const isBidUpdated = prev && prev.highestBid !== highestBid;
@@ -1226,9 +1248,14 @@
             <div class="timestamp">
               <span>Checked: <strong>${lastChecked}</strong></span>
             </div>
-            <a href="${gonzalesUrl}" target="_blank" class="gonzales-link" title="Open gonzales.php raw endpoint">
-              Gonzales ↗
-            </a>
+            <div class="card-actions">
+              <a href="${battleUrl}" target="_blank" rel="noopener noreferrer" class="battle-link" title="Open live GovAuctions battle page for #${aid}">
+                Battle Link ↗
+              </a>
+              <a href="${gonzalesUrl}" target="_blank" rel="noopener noreferrer" class="gonzales-link" title="Open gonzales.php raw endpoint">
+                Gonzales ↗
+              </a>
+            </div>
           </div>
         `;
 
