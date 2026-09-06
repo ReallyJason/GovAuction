@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GovAuctions Master Monitor | Continuous Tab Rotation Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #060913;
+      --bg-secondary: #0c1222;
+      --card-bg: rgba(15, 23, 42, 0.72);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --card-hover-border: rgba(16, 185, 129, 0.35);
+      --accent-green: #10b981;
+      --accent-green-glow: rgba(16, 185, 129, 0.25);
+      --accent-cyan: #06b6d4;
+      --accent-blue: #3b82f6;
+      --accent-yellow: #f59e0b;
+      --accent-purple: #8b5cf6;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --pill-bg: rgba(255, 255, 255, 0.05);
+      --pill-border: rgba(255, 255, 255, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      background-image: 
+        radial-gradient(circle at 10% 10%, rgba(6, 182, 212, 0.07) 0%, transparent 45%),
+        radial-gradient(circle at 90% 90%, rgba(16, 185, 129, 0.07) 0%, transparent 45%);
+      background-attachment: fixed;
+      color: var(--text-main);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Top Sticky Header */
+    header {
+      background: rgba(12, 18, 34, 0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--card-border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 0.9rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+    }
+
+    .brand-icon {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+    }
+
+    .brand-icon svg {
+      width: 24px;
+      height: 24px;
+      fill: #ffffff;
+    }
+
+    .brand-text h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(to right, #ffffff, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-text p {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--accent-green);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      letter-spacing: 0.03em;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--accent-green);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--accent-green);
+      animation: pulse-ring 1.8s infinite;
+    }
+
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+      70% { transform: scale(1.1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 1560px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 1.5rem 2rem 3rem 2rem;
+    }
+
+    /* Queue Status Telemetry Section */
+    .queue-status-banner {
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.25rem 1.75rem;
+      margin-bottom: 1.75rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 1.25rem;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    .status-metric {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      border-right: 1px solid rgba(255, 255, 255, 0.06);
+      padding-right: 0.75rem;
+    }
+
+    .status-metric:last-child {
+      border-right: none;
+    }
+
+    .status-metric-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .status-metric-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .status-metric-val.active-val {
+      color: var(--accent-green);
+      text-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    }
+
+    .status-metric-val.total-val {
+      color: var(--accent-cyan);
+    }
+
+    .status-metric-val.queued-val {
+      color: var(--accent-yellow);
+    }
+
+    .status-metric-val.checked-val {
+      color: var(--accent-blue);
+    }
+
+    .status-metric-val.cycle-val {
+      color: var(--accent-purple);
+    }
+
+    /* Controls & Filter Toolbar */
+    .controls-toolbar {
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 0.85rem 1.25rem;
+      margin-bottom: 1.75rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .search-box {
+      position: relative;
+      flex: 1;
+      min-width: 260px;
+      max-width: 420px;
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      stroke: var(--text-dim);
+    }
+
+    .search-input {
+      width: 100%;
+      background: rgba(6, 9, 19, 0.7);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 0.6rem 2.2rem 0.6rem 2.4rem;
+      color: #ffffff;
+      font-size: 0.86rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent-cyan);
+    }
+
+    .clear-search-btn {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: none;
+    }
+
+    .filter-pills {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .filter-pill {
+      background: var(--pill-bg);
+      border: 1px solid var(--pill-border);
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.4rem 0.85rem;
+      border-radius: 9999px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.2s ease;
+    }
+
+    .filter-pill:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ffffff;
+    }
+
+    .filter-pill.active {
+      background: rgba(6, 182, 212, 0.15);
+      border-color: var(--accent-cyan);
+      color: #ffffff;
+    }
+
+    .filter-pill-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 0.1rem 0.45rem;
+      border-radius: 9999px;
+    }
+
+    .sort-control {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .sort-select {
+      background: rgba(6, 9, 19, 0.8);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 0.45rem 0.8rem;
+      color: #ffffff;
+      font-size: 0.82rem;
+      font-family: inherit;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* Section Header */
+    .dashboard-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.25rem;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .section-title {
+      font-size: 1.35rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .section-title span.count {
+      font-size: 0.85rem;
+      color: var(--accent-cyan);
+      background: rgba(6, 182, 212, 0.12);
+      border: 1px solid rgba(6, 182, 212, 0.25);
+      padding: 0.15rem 0.65rem;
+      border-radius: 9999px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Auction Cards Grid */
+    .auction-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+      gap: 1.6rem;
+    }
+
+    /* Individual Auction Card */
+    .auction-card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 18px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.22s ease, border-color 0.22s, box-shadow 0.22s;
+      position: relative;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    .auction-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--card-hover-border);
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45), 0 0 20px rgba(16, 185, 129, 0.1);
+    }
+
+    /* Card Media */
+    .card-media {
+      position: relative;
+      width: 100%;
+      height: 210px;
+      background: #080d19;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .card-media img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      padding: 0.75rem;
+      transition: transform 0.3s ease;
+    }
+
+    .auction-card:hover .card-media img {
+      transform: scale(1.03);
+    }
+
+    .card-media .no-image {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .id-badge {
+      position: absolute;
+      top: 0.75rem;
+      left: 0.75rem;
+      background: rgba(6, 9, 19, 0.85);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--accent-cyan);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+      z-index: 2;
+    }
+
+    /* Status Badges */
+    .status-badge {
+      position: absolute;
+      top: 0.75rem;
+      right: 0.75rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 0.25rem 0.65rem;
+      border-radius: 6px;
+      z-index: 2;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .status-badge.status-active {
+      background: rgba(16, 185, 129, 0.18);
+      border: 1px solid rgba(16, 185, 129, 0.45);
+      color: var(--accent-green);
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
+    }
+
+    .status-badge.status-queued {
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      color: var(--accent-yellow);
+    }
+
+    .status-badge.status-recently_checked {
+      background: rgba(59, 130, 246, 0.18);
+      border: 1px solid rgba(59, 130, 246, 0.45);
+      color: var(--accent-blue);
+    }
+
+    .status-badge.status-waiting {
+      background: rgba(148, 163, 184, 0.12);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      color: #cbd5e1;
+    }
+
+    /* Thumbnail Gallery Switcher */
+    .thumbnails-bar {
+      display: flex;
+      gap: 0.35rem;
+      padding: 0.4rem 0.75rem;
+      background: rgba(9, 14, 26, 0.6);
+      overflow-x: auto;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .thumb-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      background: #0f172a;
+      overflow: hidden;
+      cursor: pointer;
+      padding: 0;
+      flex-shrink: 0;
+      transition: border-color 0.2s, opacity 0.2s;
+      opacity: 0.65;
+    }
+
+    .thumb-btn.active, .thumb-btn:hover {
+      border-color: var(--accent-cyan);
+      opacity: 1;
+    }
+
+    .thumb-btn img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Card Body */
+    .card-body {
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      gap: 1.1rem;
+    }
+
+    .product-title {
+      font-size: 1.02rem;
+      font-weight: 600;
+      line-height: 1.4;
+      color: #ffffff;
+      min-height: 2.8rem;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* Highest Bid Callout */
+    .bid-callout {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(6, 182, 212, 0.05) 100%);
+      border: 1px solid rgba(16, 185, 129, 0.22);
+      border-radius: 12px;
+      padding: 0.85rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background-color 0.3s ease, border-color 0.3s ease;
+    }
+
+    .bid-callout.updated-pulse {
+      animation: bid-flash 1.2s ease;
+    }
+
+    @keyframes bid-flash {
+      0% { background: rgba(16, 185, 129, 0.45); border-color: var(--accent-green); transform: scale(1.02); }
+      100% { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.22); transform: scale(1); }
+    }
+
+    .bid-meta {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bid-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 0.15rem;
+    }
+
+    .highest-bid-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: var(--accent-green);
+      letter-spacing: -0.02em;
+      text-shadow: 0 0 12px var(--accent-green-glow);
+    }
+
+    .bidders-counter-badge {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+
+    .bidders-count-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 0.15rem;
+    }
+
+    .bidders-count-pill {
+      background: rgba(6, 182, 212, 0.15);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      color: var(--accent-cyan);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1rem;
+      font-weight: 700;
+      padding: 0.15rem 0.6rem;
+      border-radius: 8px;
+    }
+
+    /* Bidders List */
+    .bidders-section {
+      background: rgba(8, 13, 24, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      padding: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      flex: 1;
+    }
+
+    .bidders-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .bidders-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      max-height: 110px;
+      overflow-y: auto;
+      padding-right: 0.25rem;
+    }
+
+    .bidders-list::-webkit-scrollbar {
+      width: 4px;
+    }
+    .bidders-list::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+    }
+
+    .bidder-item {
+      font-size: 0.82rem;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.15rem 0;
+    }
+
+    .bidder-bullet {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      flex-shrink: 0;
+    }
+
+    .bidder-name {
+      font-weight: 500;
+      word-break: break-all;
+    }
+
+    .bidder-name.highlight-target {
+      color: #f59e0b;
+      font-weight: 700;
+    }
+
+    .no-bidders {
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-style: italic;
+    }
+
+    /* Card Footer */
+    .card-footer {
+      border-top: 1px solid var(--card-border);
+      padding: 0.7rem 1.25rem;
+      background: rgba(8, 13, 24, 0.4);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+
+    .timestamp {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .timestamp strong {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .gonzales-link {
+      color: var(--accent-cyan);
+      text-decoration: none;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      transition: color 0.2s;
+    }
+
+    .gonzales-link:hover {
+      color: #ffffff;
+      text-decoration: underline;
+    }
+
+    /* Pagination Bar */
+    .pagination-bar {
+      margin-top: 2rem;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 0;
+    }
+
+    .page-btn {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.55rem 1.15rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .page-btn:hover:not(:disabled) {
+      background: rgba(6, 182, 212, 0.15);
+      border-color: var(--accent-cyan);
+    }
+
+    .page-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .page-info {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Empty state */
+    .empty-state {
+      grid-column: 1 / -1;
+      background: var(--card-bg);
+      border: 1px dashed var(--card-border);
+      border-radius: 20px;
+      padding: 4rem 2rem;
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .empty-state h3 {
+      font-size: 1.25rem;
+      color: #ffffff;
+      margin-bottom: 0.5rem;
+    }
+
+    .empty-state p {
+      font-size: 0.9rem;
+      max-width: 550px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 768px) {
+      header { padding: 1rem; }
+      main { padding: 1rem; }
+      .queue-status-banner { grid-template-columns: 1fr 1fr; }
+      .controls-toolbar { flex-direction: column; align-items: stretch; }
+      .search-box { max-width: 100%; }
+      .auction-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>GovAuctions Master Monitor</h1>
+        <p>Continuous 10-Tab Priority Rotation</p>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <div class="live-badge">
+        <div class="pulse-dot"></div>
+        <span>ROTATION ENGINE ACTIVE</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main>
+
+    <!-- Telemetry Banner -->
+    <div class="queue-status-banner">
+      <div class="status-metric">
+        <span class="status-metric-label">Active Tabs</span>
+        <span class="status-metric-val active-val" id="metric-active">0 / 10</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-metric-label">Total Discovered</span>
+        <span class="status-metric-val total-val" id="metric-total">0</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-metric-label">Queued Next</span>
+        <span class="status-metric-val queued-val" id="metric-queued">0</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-metric-label">Recently Checked</span>
+        <span class="status-metric-val checked-val" id="metric-checked">0</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-metric-label">Last Cycle</span>
+        <span class="status-metric-val cycle-val" id="metric-cycle">Starting...</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-metric-label">Last Static Refresh</span>
+        <span class="status-metric-val" style="font-size: 1.15rem; color: #a78bfa;" id="metric-static">Waiting...</span>
+      </div>
+    </div>
+
+    <!-- Search & Filter Controls Toolbar -->
+    <div class="controls-toolbar">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" id="search-input" class="search-input" placeholder="Search by auction ID, product title, or keyword..." oninput="onSearchInput()"/>
+        <button id="clear-search-btn" class="clear-search-btn" onclick="clearSearch()">&times;</button>
+      </div>
+
+      <div class="filter-pills">
+        <button class="filter-pill active" data-filter="all" onclick="setFilter('all')">
+          All <span class="filter-pill-count" id="count-all">0</span>
+        </button>
+        <button class="filter-pill" data-filter="active" onclick="setFilter('active')">
+          🟢 Active <span class="filter-pill-count" id="count-active">0</span>
+        </button>
+        <button class="filter-pill" data-filter="queued" onclick="setFilter('queued')">
+          🟡 Queued <span class="filter-pill-count" id="count-queued">0</span>
+        </button>
+        <button class="filter-pill" data-filter="recently_checked" onclick="setFilter('recently_checked')">
+          🔵 Checked <span class="filter-pill-count" id="count-checked">0</span>
+        </button>
+        <button class="filter-pill" data-filter="waiting" onclick="setFilter('waiting')">
+          ⚪ Waiting <span class="filter-pill-count" id="count-waiting">0</span>
+        </button>
+        <button class="filter-pill" data-filter="hot" onclick="setFilter('hot')">
+          🔥 Hot Battles <span class="filter-pill-count" id="count-hot">0</span>
+        </button>
+      </div>
+
+      <div class="sort-control">
+        <label for="sort-select">Sort:</label>
+        <select id="sort-select" class="sort-select" onchange="onSortChange()">
+          <option value="status">Status (Active First)</option>
+          <option value="bid_high">Highest Bid ($ High to Low)</option>
+          <option value="bidders">Most Bidders</option>
+          <option value="last_checked">Last Checked (Most Recent)</option>
+          <option value="auction_id">Auction ID</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Active Cards Section Header -->
+    <div class="dashboard-header">
+      <h2 class="section-title">
+        Master Auction List
+        <span class="count" id="filtered-count-badge">0</span>
+      </h2>
+      <div style="font-size: 0.85rem; color: var(--text-muted);" id="pagination-summary">
+        Displaying battles across rotation batches
+      </div>
+    </div>
+
+    <!-- Auction Cards Grid -->
+    <div class="auction-grid" id="auction-grid">
+      <div class="empty-state" id="loading-state">
+        <div class="pulse-dot" style="margin: 0 auto 1.5rem; width: 14px; height: 14px;"></div>
+        <h3>Initializing Master Auction Engine...</h3>
+        <p>Waiting for staticData responses to discover battles. Once detected, the 10 browser tabs will rotate continuously and populate live cards.</p>
+      </div>
+    </div>
+
+    <!-- Pagination Controls -->
+    <div class="pagination-bar" id="pagination-bar" style="display: none;">
+      <button class="page-btn" id="prev-page-btn" onclick="changePage(-1)" disabled>← Previous</button>
+      <span class="page-info" id="page-info">Page 1 of 1</span>
+      <button class="page-btn" id="next-page-btn" onclick="changePage(1)" disabled>Next →</button>
+    </div>
+
+  </main>
+
+  <script>
+    // State management
+    let masterAuctions = [];
+    let currentFilter = 'all';
+    let searchQuery = '';
+    let currentSort = 'status';
+    let currentPage = 1;
+    const pageSize = 24;
+
+    const previousState = new Map();
+
+    async function pollDashboard() {
+      try {
+        // 1. Fetch live master auctions
+        const res = await fetch('/api/auctions');
+        if (res.ok) {
+          masterAuctions = await res.json();
+          updateCounts();
+          renderGrid();
+        }
+
+        // 2. Fetch telemetry stats
+        const statusRes = await fetch('/api/status');
+        if (statusRes.ok) {
+          const stats = await statusRes.json();
+          document.getElementById('metric-active').innerText = `${stats.active_count || 0} / 10`;
+          document.getElementById('metric-total').innerText = stats.total_discovered || masterAuctions.length;
+          document.getElementById('metric-queued').innerText = stats.queued_count || 0;
+          document.getElementById('metric-checked').innerText = stats.recently_checked_count || 0;
+          document.getElementById('metric-cycle').innerText = stats.last_cycle_time || 'Running...';
+          document.getElementById('metric-static').innerText = stats.last_static_refresh || 'Waiting...';
+        }
+      } catch (err) {
+        console.warn("Telemetry poll error:", err);
+      }
+    }
+
+    function updateCounts() {
+      const total = masterAuctions.length;
+      let activeCount = 0;
+      let queuedCount = 0;
+      let checkedCount = 0;
+      let waitingCount = 0;
+      let hotCount = 0;
+
+      const now = Date.now() / 1000;
+
+      masterAuctions.forEach(a => {
+        const s = a.status || 'waiting';
+        if (s === 'active') activeCount++;
+        else if (s === 'queued') queuedCount++;
+        else if (s === 'recently_checked') checkedCount++;
+        else waitingCount++;
+
+        if ((a.activityScore && a.activityScore > 0) || (a.lastBidChangeTime && (now - a.lastBidChangeTime) < 300)) {
+          hotCount++;
+        }
+      });
+
+      document.getElementById('count-all').innerText = total;
+      document.getElementById('count-active').innerText = activeCount;
+      document.getElementById('count-queued').innerText = queuedCount;
+      document.getElementById('count-checked').innerText = checkedCount;
+      document.getElementById('count-waiting').innerText = waitingCount;
+      document.getElementById('count-hot').innerText = hotCount;
+    }
+
+    function getFilteredAuctions() {
+      let list = [...masterAuctions];
+      const now = Date.now() / 1000;
+
+      // Filter by status / hot
+      if (currentFilter !== 'all') {
+        if (currentFilter === 'hot') {
+          list = list.filter(a => (a.activityScore && a.activityScore > 0) || (a.lastBidChangeTime && (now - a.lastBidChangeTime) < 300));
+        } else {
+          list = list.filter(a => (a.status || 'waiting') === currentFilter);
+        }
+      }
+
+      // Filter by search query
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase().trim();
+        list = list.filter(a => {
+          const aid = String(a.auctionId || a.id || '').toLowerCase();
+          const name = String(a.name || '').toLowerCase();
+          return aid.includes(q) || name.includes(q);
+        });
+      }
+
+      // Sort
+      if (currentSort === 'bid_high') {
+        list.sort((a, b) => (Number(b.highestBid) || 0) - (Number(a.highestBid) || 0));
+      } else if (currentSort === 'bidders') {
+        list.sort((a, b) => ((b.bidders && b.bidders.length) || 0) - ((a.bidders && a.bidders.length) || 0));
+      } else if (currentSort === 'last_checked') {
+        list.sort((a, b) => (b.lastCheckedTime || 0) - (a.lastCheckedTime || 0));
+      } else if (currentSort === 'auction_id') {
+        list.sort((a, b) => String(a.auctionId).localeCompare(String(b.auctionId)));
+      } else {
+        // Default: active first, then queued, then recently_checked, then waiting
+        const statusOrder = { active: 0, queued: 1, recently_checked: 2, waiting: 3 };
+        list.sort((a, b) => {
+          const sa = statusOrder[a.status] !== undefined ? statusOrder[a.status] : 4;
+          const sb = statusOrder[b.status] !== undefined ? statusOrder[b.status] : 4;
+          if (sa !== sb) return sa - sb;
+          if (a.activeSlot && b.activeSlot) return a.activeSlot - b.activeSlot;
+          return (b.lastCheckedTime || 0) - (a.lastCheckedTime || 0);
+        });
+      }
+
+      return list;
+    }
+
+    function renderGrid() {
+      const grid = document.getElementById('auction-grid');
+      const filtered = getFilteredAuctions();
+      const totalFiltered = filtered.length;
+
+      document.getElementById('filtered-count-badge').innerText = `${totalFiltered} ${currentFilter.toUpperCase()}`;
+
+      if (totalFiltered === 0) {
+        grid.innerHTML = `
+          <div class="empty-state">
+            <h3>No Battles Match Filter</h3>
+            <p>No auctions currently match the filter <strong>"${currentFilter}"</strong>${searchQuery ? ` and search "${escapeHtml(searchQuery)}"` : ''}. Try selecting "All" or clearing the search query.</p>
+          </div>
+        `;
+        document.getElementById('pagination-bar').style.display = 'none';
+        return;
+      }
+
+      const totalPages = Math.ceil(totalFiltered / pageSize) || 1;
+      if (currentPage > totalPages) currentPage = totalPages;
+      if (currentPage < 1) currentPage = 1;
+
+      const startIndex = (currentPage - 1) * pageSize;
+      const endIndex = Math.min(startIndex + pageSize, totalFiltered);
+      const pageItems = filtered.slice(startIndex, endIndex);
+
+      // Update pagination UI
+      const pagBar = document.getElementById('pagination-bar');
+      if (totalPages > 1) {
+        pagBar.style.display = 'flex';
+        document.getElementById('page-info').innerText = `Page ${currentPage} of ${totalPages} (Showing ${startIndex + 1}-${endIndex} of ${totalFiltered})`;
+        document.getElementById('prev-page-btn').disabled = currentPage === 1;
+        document.getElementById('next-page-btn').disabled = currentPage === totalPages;
+      } else {
+        pagBar.style.display = 'none';
+      }
+
+      document.getElementById('pagination-summary').innerText = `Showing ${startIndex + 1}-${endIndex} of ${totalFiltered} discovered battles`;
+
+      const visibleIds = new Set(pageItems.map(a => String(a.auctionId || a.id)));
+
+      // Remove cards no longer visible on this page
+      Array.from(grid.children).forEach(child => {
+        if (child.id && child.id.startsWith('card-')) {
+          const aid = child.id.replace('card-', '');
+          if (!visibleIds.has(aid)) {
+            child.remove();
+          }
+        }
+      });
+
+      // Clear empty state if any
+      const emptyState = grid.querySelector('.empty-state');
+      if (emptyState) emptyState.remove();
+
+      pageItems.forEach((auction, idx) => {
+        const aid = String(auction.auctionId || auction.id);
+        const prev = previousState.get(aid);
+
+        const status = auction.status || 'waiting';
+        const activeSlot = auction.activeSlot;
+        const highestBid = auction.highestBidFormatted || (auction.highestBid ? `$${Number(auction.highestBid).toFixed(2)}` : 'N/A');
+        const bidders = auction.bidders || [];
+        const name = auction.name || `Auction #${aid}`;
+        const images = (auction.productImages && auction.productImages.length > 0)
+          ? auction.productImages
+          : (auction.primaryImage ? [auction.primaryImage] : (auction.image ? [auction.image] : []));
+        const primaryImage = auction.primaryImage || images[0] || '';
+        const lastChecked = auction.lastChecked || 'Waiting...';
+        const lastUpdated = auction.lastUpdated || 'Never';
+        const gonzalesUrl = auction.gonzalesUrl || `https://www.govauctions.com/gonzales.php?idlist=${aid}&auctionDetailsIds=${aid}`;
+
+        const isBidUpdated = prev && prev.highestBid !== highestBid;
+
+        let statusText = '⚪ WAITING';
+        let statusClass = 'status-waiting';
+        if (status === 'active') {
+          statusText = `🟢 ACTIVE${activeSlot ? ` (Tab ${activeSlot})` : ''}`;
+          statusClass = 'status-active';
+        } else if (status === 'queued') {
+          statusText = '🟡 QUEUED';
+          statusClass = 'status-queued';
+        } else if (status === 'recently_checked') {
+          statusText = '🔵 CHECKED';
+          statusClass = 'status-recently_checked';
+        }
+
+        let card = document.getElementById(`card-${aid}`);
+        if (!card) {
+          card = document.createElement('div');
+          card.className = 'auction-card';
+          card.id = `card-${aid}`;
+          grid.appendChild(card);
+        }
+
+        // Bidders list markup
+        let biddersHtml = '';
+        if (bidders.length > 0) {
+          biddersHtml = bidders.map(b => {
+            const isTarget = String(b).toLowerCase().includes('oneontopofyou');
+            return `
+              <li class="bidder-item">
+                <span class="bidder-bullet"></span>
+                <span class="bidder-name ${isTarget ? 'highlight-target' : ''}">
+                  ${escapeHtml(b)} ${isTarget ? '★' : ''}
+                </span>
+              </li>
+            `;
+          }).join('');
+        } else {
+          biddersHtml = `<li class="no-bidders">No bids recorded yet</li>`;
+        }
+
+        // Thumbnails switcher
+        let thumbsHtml = '';
+        if (images.length > 1) {
+          thumbsHtml = `<div class="thumbnails-bar">` + images.slice(0, 6).map((img, i) => `
+            <button class="thumb-btn ${i === 0 ? 'active' : ''}" onclick="switchCardImage('${aid}', '${encodeURIComponent(img)}', this)">
+              <img src="${img}" alt="Thumb ${i + 1}" onerror="this.src=''"/>
+            </button>
+          `).join('') + `</div>`;
+        }
+
+        card.innerHTML = `
+          <div class="card-media">
+            <span class="id-badge">ID: #${aid}</span>
+            <span class="status-badge ${statusClass}">${statusText}</span>
+            ${primaryImage 
+              ? `<img id="main-img-${aid}" src="${primaryImage}" alt="${escapeHtml(name)}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"/>
+                 <div class="no-image" style="display:none;"><span>📦 No Preview Available</span></div>` 
+              : `<div class="no-image"><span>📦 No Preview Available</span></div>`
+            }
+          </div>
+          ${thumbsHtml}
+
+          <div class="card-body">
+            <div class="product-title" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+
+            <div class="bid-callout ${isBidUpdated ? 'updated-pulse' : ''}">
+              <div class="bid-meta">
+                <span class="bid-label">Highest Bid</span>
+                <span class="highest-bid-val" id="bid-val-${aid}">${highestBid}</span>
+              </div>
+              <div class="bidders-counter-badge">
+                <span class="bidders-count-label">Unique Bidders</span>
+                <span class="bidders-count-pill">${bidders.length}</span>
+              </div>
+            </div>
+
+            <div class="bidders-section">
+              <div class="bidders-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="9" cy="7" r="4"></circle>
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                Bidders (${bidders.length})
+              </div>
+              <ul class="bidders-list">
+                ${biddersHtml}
+              </ul>
+            </div>
+          </div>
+
+          <div class="card-footer">
+            <div class="timestamp">
+              <span>Checked: <strong>${lastChecked}</strong></span>
+            </div>
+            <a href="${gonzalesUrl}" target="_blank" class="gonzales-link" title="Open gonzales.php raw endpoint">
+              Gonzales ↗
+            </a>
+          </div>
+        `;
+
+        previousState.set(aid, { highestBid, biddersCount: bidders.length });
+      });
+    }
+
+    function switchCardImage(aid, encodedImg, btn) {
+      const imgUrl = decodeURIComponent(encodedImg);
+      const imgEl = document.getElementById(`main-img-${aid}`);
+      if (imgEl) {
+        imgEl.src = imgUrl;
+        imgEl.style.display = 'block';
+      }
+      const parent = btn.parentElement;
+      if (parent) {
+        parent.querySelectorAll('.thumb-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      }
+    }
+
+    function setFilter(filterType) {
+      currentFilter = filterType;
+      currentPage = 1;
+      document.querySelectorAll('.filter-pill').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-filter') === filterType);
+      });
+      renderGrid();
+    }
+
+    function onSearchInput() {
+      const input = document.getElementById('search-input');
+      searchQuery = input.value;
+      currentPage = 1;
+      document.getElementById('clear-search-btn').style.display = searchQuery ? 'block' : 'none';
+      renderGrid();
+    }
+
+    function clearSearch() {
+      const input = document.getElementById('search-input');
+      input.value = '';
+      searchQuery = '';
+      currentPage = 1;
+      document.getElementById('clear-search-btn').style.display = 'none';
+      renderGrid();
+    }
+
+    function onSortChange() {
+      currentSort = document.getElementById('sort-select').value;
+      currentPage = 1;
+      renderGrid();
+    }
+
+    function changePage(delta) {
+      currentPage += delta;
+      renderGrid();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // Auto-poll every 1200ms
+    pollDashboard();
+    setInterval(pollDashboard, 1200);
+  </script>
+</body>
+</html>
