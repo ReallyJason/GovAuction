@@ -94,6 +94,7 @@ class AuctionQueueEngine:
         Refreshes product metadata (name, images) for existing auctions.
         """
         discovered_ids = []
+        now = time.time()
         now_str = time.strftime("%I:%M:%S %p").lstrip("0")
 
         with self.lock:
@@ -128,6 +129,10 @@ class AuctionQueueEngine:
 
                     primary_img = product_images[0] if product_images else ""
 
+                    if aid not in self.discovery_order:
+                        self.discovery_order.append(aid)
+                    first_seen_order = self.discovery_order.index(aid) + 1
+
                     if aid in self.master_auctions:
                         rec = self.master_auctions[aid]
                         rec["name"] = name
@@ -139,6 +144,9 @@ class AuctionQueueEngine:
                             "auctionId": aid,
                             "id": aid,
                             "name": name,
+                            "firstSeenOrder": first_seen_order,
+                            "firstSeenTime": now,
+                            "firstSeenFormatted": now_str,
                             "productImages": product_images,
                             "primaryImage": primary_img,
                             "highestBid": 0.0,
@@ -166,11 +174,18 @@ class AuctionQueueEngine:
                     q_id = str(q_id).strip()
                     if q_id and q_id not in discovered_ids:
                         discovered_ids.append(q_id)
+                        if q_id not in self.discovery_order:
+                            self.discovery_order.append(q_id)
+                        q_first_seen_order = self.discovery_order.index(q_id) + 1
+
                         if q_id not in self.master_auctions:
                             self.master_auctions[q_id] = {
                                 "auctionId": q_id,
                                 "id": q_id,
                                 "name": f"Auction #{q_id}",
+                                "firstSeenOrder": q_first_seen_order,
+                                "firstSeenTime": now,
+                                "firstSeenFormatted": now_str,
                                 "productImages": [],
                                 "primaryImage": "",
                                 "highestBid": 0.0,
@@ -324,10 +339,17 @@ class AuctionQueueEngine:
 
         with self.lock:
             if aid not in self.master_auctions:
+                if aid not in self.discovery_order:
+                    self.discovery_order.append(aid)
+                first_seen_order = self.discovery_order.index(aid) + 1
+
                 self.master_auctions[aid] = {
                     "auctionId": aid,
                     "id": aid,
                     "name": f"Auction #{aid}",
+                    "firstSeenOrder": first_seen_order,
+                    "firstSeenTime": now,
+                    "firstSeenFormatted": now_str,
                     "productImages": [],
                     "primaryImage": "",
                     "highestBid": 0.0,
@@ -453,7 +475,10 @@ class AuctionQueueEngine:
             cards = []
             for aid, rec in self.master_auctions.items():
                 c = dict(rec)
-                c["discoveryIndex"] = self.discovery_order.index(aid) if aid in self.discovery_order else 0
+                disc_idx = self.discovery_order.index(aid) if aid in self.discovery_order else 0
+                c["discoveryIndex"] = disc_idx
+                c["firstSeenOrder"] = rec.get("firstSeenOrder") or (disc_idx + 1)
+                c["firstSeenTime"] = rec.get("firstSeenTime", 0.0)
                 cards.append(c)
 
         if search:
@@ -468,22 +493,20 @@ class AuctionQueueEngine:
                 cards = [c for c in cards if c.get("status") == sf]
 
         # Sorting
-        if sort_by == "bid_high":
+        if sort_by in ["first_seen_asc", "first_seen", "oldest"]:
+            cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)))
+        elif sort_by in ["first_seen_desc", "newest_first_seen"]:
+            cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)), reverse=True)
+        elif sort_by == "bid_high":
             cards.sort(key=lambda c: c.get("highestBid", 0.0), reverse=True)
         elif sort_by == "bidders":
             cards.sort(key=lambda c: len(c.get("bidders", [])), reverse=True)
         elif sort_by == "active":
             status_order = {"active": 0, "queued": 1, "recently_checked": 2, "waiting": 3}
             cards.sort(key=lambda c: (status_order.get(c.get("status"), 4), c.get("activeSlot") or 99))
-        elif sort_by == "newest_discovered":
-            idx_map = {aid: i for i, aid in enumerate(self.discovery_order)}
-            cards.sort(key=lambda c: idx_map.get(c.get("auctionId"), 0), reverse=True)
         elif sort_by == "auction_id":
             cards.sort(key=lambda c: c.get("auctionId", ""))
-        else:
-            # Default sorting: Recently Checked / Updated First!
-            # Checked items appear first. When an item is checked or receives a new bid,
-            # its event timestamp updates and it floats to the very first position.
+        elif sort_by == "recent":
             def sort_key(c):
                 checked = 1 if (c.get("lastCheckedTime", 0) > 0 or len(c.get("bidders", [])) > 0 or c.get("highestBid", 0) > 0) else 0
                 event_time = max(c.get("lastCheckedTime", 0.0), c.get("lastBidChangeTime", 0.0))
@@ -495,6 +518,9 @@ class AuctionQueueEngine:
                     -disc_idx
                 )
             cards.sort(key=sort_key, reverse=True)
+        else:
+            # Default sorting: First Seen: Oldest -> Newest (preserves original discovered position!)
+            cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)))
 
         return cards
 
