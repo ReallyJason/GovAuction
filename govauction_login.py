@@ -217,6 +217,8 @@ class AuctionQueueEngine:
             if new_count > 0:
                 print(f"\n[+] [StaticData Refresh] Added {new_count} new battle(s). Total discovered: {len(self.master_auctions)}")
 
+            return discovered_ids
+
     def sync_tab_pool(self):
         """
         Maintains exactly up to max_active (10) persistent Playwright browser tabs.
@@ -650,6 +652,310 @@ def start_dashboard_server(engine, host="127.0.0.1", port=DEFAULT_DASHBOARD_PORT
     return None, None
 
 
+class PageNavigator:
+    """
+    Manages page-by-page discovery and pagination on GovAuctions home page:
+    1. Monitors and processes all auctions on the current page first.
+    2. Once all auctions on the current page have been seen/processed (scraped by 10-tab pool),
+       looks for the next available pagination button identified by aria-label (e.g. aria-label="2").
+    3. Handles missing pagination buttons: If the next sequential button does not exist in the DOM,
+       does NOT guess or construct URLs; immediately returns to the previous available pagination button
+       (e.g., 1 -> 2 -> 3 -> 2, or 1 -> 2 -> 3 -> 4 -> 5 -> 4).
+    4. Navigates bidirectional sweep (patrol) smoothly across all available pages.
+    """
+    def __init__(self, min_dwell_time=4.0, max_page_timeout=35.0):
+        self.current_page = 1
+        self.direction = 1  # 1 for forward, -1 for backward
+        self.page_start_time = time.time()
+        self.page_auction_ids = set()
+        self.min_dwell_time = min_dwell_time
+        self.max_page_timeout = max_page_timeout
+        self.history = [1]
+        self.last_nav_time = 0.0
+        self.last_scan_time = 0.0
+        self.lock = threading.Lock()
+
+    def record_page_static_auctions(self, auction_ids):
+        """Records auction IDs intercepted from staticData responses while on current page."""
+        if not auction_ids:
+            return
+        with self.lock:
+            for aid in auction_ids:
+                if aid:
+                    self.page_auction_ids.add(str(aid).strip())
+
+    def scan_page_auction_ids(self, page):
+        """
+        Extracts all auction IDs currently visible in the DOM of the home page:
+        - Battle links: href contains '/battle/{id}'
+        - Query parameters: 'idlist={id}', 'auctionDetailsIds={id}', 'auctionId={id}'
+        - Data attributes: 'data-auction-id', 'data-id', 'data-item-id'
+        - Element IDs / classes: 'auction-{id}', 'battle-{id}'
+        """
+        try:
+            dom_ids = page.evaluate("""() => {
+                const ids = new Set();
+                
+                // 1. Check all anchor tags
+                document.querySelectorAll('a[href]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const battleMatch = href.match(/\\/battle\\/(\\d+)/i);
+                    if (battleMatch) ids.add(battleMatch[1]);
+
+                    const qMatch = href.match(/(?:idlist|auctionDetailsIds|auctionId|auction_id)=(\\d+)/i);
+                    if (qMatch) ids.add(qMatch[1]);
+                });
+
+                // 2. Check data attributes
+                document.querySelectorAll('[data-auction-id], [data-auctionid], [data-id], [data-item-id]').forEach(el => {
+                    const val = el.getAttribute('data-auction-id') || el.getAttribute('data-auctionid') || el.getAttribute('data-id') || el.getAttribute('data-item-id');
+                    if (val && /^\\d+$/.test(val.trim())) {
+                        ids.add(val.trim());
+                    }
+                });
+
+                // 3. Check element IDs
+                document.querySelectorAll('[id*="auction-"], [id*="battle-"]').forEach(el => {
+                    const idStr = el.id || '';
+                    const m = idStr.match(/(?:auction|battle)-(\\d+)/i);
+                    if (m) ids.add(m[1]);
+                });
+
+                return Array.from(ids);
+            }""")
+            with self.lock:
+                for aid in dom_ids:
+                    if aid:
+                        self.page_auction_ids.add(str(aid).strip())
+        except Exception:
+            pass
+
+    def get_available_pages(self, page):
+        """
+        Inspects DOM and returns sorted list of integer page numbers found with [aria-label].
+        E.g. buttons with aria-label="1", aria-label="2", aria-label="3".
+        """
+        try:
+            pages = page.evaluate("""() => {
+                const els = document.querySelectorAll('[aria-label]');
+                const found = new Set();
+                for (const el of els) {
+                    const lbl = (el.getAttribute('aria-label') || '').trim();
+                    const m = lbl.match(/^(?:page\\s*)?(\\d+)$/i);
+                    if (m) {
+                        found.add(parseInt(m[1], 10));
+                    }
+                }
+                return Array.from(found).sort((a, b) => a - b);
+            }""")
+            return sorted(list(set(pages))) if pages else []
+        except Exception:
+            return []
+
+    def get_dom_active_page(self, page):
+        """Detects current active page in DOM if marked with active/current attributes."""
+        try:
+            return page.evaluate("""() => {
+                const els = document.querySelectorAll('[aria-label]');
+                for (const el of els) {
+                    const lbl = (el.getAttribute('aria-label') || '').trim();
+                    const m = lbl.match(/^(?:page\\s*)?(\\d+)$/i);
+                    if (m) {
+                        const isCurrent = el.getAttribute('aria-current') === 'page' ||
+                                          el.getAttribute('aria-current') === 'true' ||
+                                          el.getAttribute('aria-selected') === 'true' ||
+                                          el.classList.contains('active') ||
+                                          el.classList.contains('current') ||
+                                          el.classList.contains('selected') ||
+                                          el.parentElement && (
+                                              el.parentElement.classList.contains('active') ||
+                                              el.parentElement.classList.contains('current')
+                                          );
+                        if (isCurrent) return parseInt(m[1], 10);
+                    }
+                }
+                return null;
+            }""")
+        except Exception:
+            return None
+
+    def is_page_fully_processed(self, engine):
+        """
+        Determines if all auctions on the current page have been seen/processed.
+        - Must satisfy minimum dwell time so initial page staticData has arrived.
+        - Every auction discovered on the current page must have checkCount > 0.
+        - Failsafe timeout (35s) ensures the monitor won't hang indefinitely if an item stalls.
+        """
+        now = time.time()
+        elapsed = now - self.page_start_time
+
+        if elapsed < self.min_dwell_time:
+            return False
+
+        if elapsed >= self.max_page_timeout:
+            return True
+
+        with self.lock:
+            current_ids = list(self.page_auction_ids)
+
+        if not current_ids:
+            if elapsed < 8.0:
+                return False
+            return True
+
+        with engine.lock:
+            unprocessed = [
+                aid for aid in current_ids
+                if engine.master_auctions.get(aid, {}).get("checkCount", 0) == 0
+            ]
+
+        return len(unprocessed) == 0
+
+    def advance_pagination(self, page, engine):
+        """
+        Executes the pagination transition:
+        1. Inspects actual DOM buttons with [aria-label].
+        2. If next sequential page button exists, clicks it.
+        3. If next button is missing, goes back to the previous available button (e.g. 3 -> 2, 5 -> 4).
+        4. When moving backward and reaching page 1, switches back to forward.
+        """
+        available = self.get_available_pages(page)
+        if not available:
+            # No aria-label pagination controls present
+            self.page_start_time = time.time()
+            return False
+
+        dom_active = self.get_dom_active_page(page)
+        if dom_active and dom_active in available:
+            self.current_page = dom_active
+
+        curr = self.current_page
+        target_page = None
+
+        if self.direction == 1:
+            # Moving forward
+            next_cand = curr + 1
+            if next_cand in available:
+                target_page = next_cand
+            else:
+                # Next sequential page is MISSING!
+                # Do NOT guess URLs. Go back to previous available pagination button.
+                prev_cands = [p for p in available if p < curr]
+                if prev_cands:
+                    target_page = max(prev_cands)
+                    self.direction = -1
+                    print(f"\n[Pagination] Page {curr}: Next button (aria-label=\"{next_cand}\") is missing.")
+                    print(f"             Returning to previous available button: Page {target_page} (aria-label=\"{target_page}\").")
+                else:
+                    target_page = curr
+        else:
+            # Moving backward
+            prev_cands = [p for p in available if p < curr]
+            if prev_cands:
+                target_page = max(prev_cands)
+            else:
+                # Reached earliest available page (e.g. Page 1), switch forward
+                self.direction = 1
+                forward_cands = [p for p in available if p > curr]
+                if forward_cands:
+                    target_page = min(forward_cands)
+                else:
+                    target_page = curr
+
+        if target_page == curr and len(available) <= 1:
+            self.page_start_time = time.time()
+            return False
+
+        with self.lock:
+            item_count = len(self.page_auction_ids)
+
+        print(f"\n" + "-" * 75)
+        print(f" [Pagination] Page {curr} fully processed ({item_count} items seen/checked).")
+        print(f" [Pagination] Navigating: Page {curr} -> Page {target_page} (aria-label=\"{target_page}\")")
+        print(f"              Available pages in DOM: {available}")
+        print("-" * 75 + "\n")
+
+        success = self.click_page_button(page, target_page)
+        if success:
+            self.current_page = target_page
+            self.history.append(target_page)
+            self.page_start_time = time.time()
+            self.last_nav_time = time.time()
+            with self.lock:
+                self.page_auction_ids.clear()
+            page.wait_for_timeout(1500)
+            self.scan_page_auction_ids(page)
+            return True
+        else:
+            print(f"[Pagination] Failed to click aria-label=\"{target_page}\" button.")
+            self.page_start_time = time.time()
+            return False
+
+    def click_page_button(self, page, target_page):
+        """Locates and clicks the pagination button with aria-label="{target_page}"."""
+        selector = f'[aria-label="{target_page}"], [aria-label="Page {target_page}"], [aria-label="page {target_page}"]'
+        try:
+            btn = page.query_selector(selector)
+            if btn:
+                try:
+                    btn.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(250)
+                try:
+                    btn.click(timeout=3000)
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    except Exception:
+                        pass
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            clicked = page.evaluate(f"""() => {{
+                const el = document.querySelector('[aria-label="{target_page}"], [aria-label="Page {target_page}"], [aria-label="page {target_page}"]');
+                if (el) {{
+                    el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    el.click();
+                    return true;
+                }}
+                return false;
+            }}""")
+            if clicked:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def get_status_summary(self, engine):
+        """Returns formatted string status of pagination navigator."""
+        now = time.time()
+        elapsed = now - self.page_start_time
+        with self.lock:
+            aids = list(self.page_auction_ids)
+        with engine.lock:
+            checked = sum(1 for a in aids if engine.master_auctions.get(a, {}).get("checkCount", 0) > 0)
+        hist_str = " -> ".join(map(str, self.history[-10:]))
+        dir_str = "Forward (+1)" if self.direction == 1 else "Backward (-1)"
+        return (
+            f"\n--- PAGINATION NAVIGATOR STATUS ---\n"
+            f" Current Page       : Page {self.current_page}\n"
+            f" Traversal Direction: {dir_str}\n"
+            f" Page Auctions      : {checked}/{len(aids)} processed/checked\n"
+            f" Dwell Time on Page : {elapsed:.1f}s (min: {self.min_dwell_time}s, max: {self.max_page_timeout}s)\n"
+            f" Navigation Path    : {hist_str}\n"
+            f"-----------------------------------\n"
+        )
+
+
 class NetworkMonitor:
     """
     Listens to browser network traffic:
@@ -657,9 +963,10 @@ class NetworkMonitor:
     - Intercepts gonzales.php responses and updates bid histories.
     - Checks all responses and WebSockets for keyword 'oneontopofyou'.
     """
-    def __init__(self, engine, target_keyword=TARGET_KEYWORD):
+    def __init__(self, engine, target_keyword=TARGET_KEYWORD, navigator=None):
         self.engine = engine
         self.target = target_keyword.lower()
+        self.navigator = navigator
         self.matches = []
         self.total_responses = 0
         self.lock = threading.Lock()
@@ -697,7 +1004,9 @@ class NetworkMonitor:
                     body = response.text()
                     if body.strip().startswith(("{", "[")):
                         data = json.loads(body)
-                        self.engine.process_static_data(data, raw_url=url)
+                        discovered = self.engine.process_static_data(data, raw_url=url)
+                        if self.navigator and discovered:
+                            self.navigator.record_page_static_auctions(discovered)
                 except Exception:
                     pass
 
@@ -837,7 +1146,8 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
     """
     os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
     engine = AuctionQueueEngine(max_active=MAX_ACTIVE_AUCTIONS)
-    monitor = NetworkMonitor(engine=engine, target_keyword=TARGET_KEYWORD)
+    navigator = PageNavigator(min_dwell_time=4.0, max_page_timeout=35.0)
+    monitor = NetworkMonitor(engine=engine, target_keyword=TARGET_KEYWORD, navigator=navigator)
 
     # Start localhost dashboard
     server, dashboard_url = start_dashboard_server(engine, port=dashboard_port)
@@ -967,11 +1277,18 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
             if context.pages:
                 context.pages[0].wait_for_timeout(500)
 
+        # Initial scan of Page 1
+        navigator.current_page = 1
+        navigator.page_start_time = time.time()
+        navigator.scan_page_auction_ids(home_page)
+
         # Print command menu
         print("\n" + "=" * 75)
         print(" CONTINUOUS AUCTION MONITOR CONSOLE:")
         print(f" - Localhost Dashboard   : {dashboard_url}")
         print(" - 'queue'               : Show active 1-10 slots and waiting queue")
+        print(" - 'page' / 'p'          : Show current page pagination & processing status")
+        print(" - 'step' / 'p-next'     : Force advance to next pagination page")
         print(" - 'next' / 'rotate'     : Retire an active auction so next queued one steps in")
         print(" - 'poll' / 'cycle'      : Force an immediate cycle through all active auctions")
         print(" - 'home'                : Reload GovAuctions home to refresh staticData")
@@ -983,6 +1300,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
         print("Command: ", end="", flush=True)
 
         last_cycle_time = time.time()
+        last_page_scan_time = time.time()
 
         while not stop_event.is_set():
             if not context.pages:
@@ -999,6 +1317,16 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
 
                 elif cmd_clean.lower() in ["queue", "q-list", "status"]:
                     print(engine.get_summary_table())
+                    print("Command: ", end="", flush=True)
+
+                elif cmd_clean.lower() in ["page", "p", "nav", "pagination"]:
+                    print(navigator.get_status_summary(engine))
+                    print("Command: ", end="", flush=True)
+
+                elif cmd_clean.lower() in ["step", "p-next", "next-page"]:
+                    print("\nForcing advance to next pagination page...")
+                    navigator.advance_pagination(home_page, engine)
+                    print(navigator.get_status_summary(engine))
                     print("Command: ", end="", flush=True)
 
                 elif cmd_clean.lower() in ["next", "rotate"]:
@@ -1041,6 +1369,8 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                 elif cmd_clean.lower() in ["help", "h", "?"]:
                     print("\nAvailable Commands:")
                     print("  queue            - View 10 active slots & waiting queue")
+                    print("  page / p         - View pagination and page processing status")
+                    print("  step / p-next    - Force advance to next pagination page")
                     print("  next / rotate    - Retire an active auction so next queued one steps in")
                     print("  poll / cycle     - Trigger an immediate cycle")
                     print("  dash             - Open localhost dashboard")
@@ -1062,6 +1392,18 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                 last_cycle_time = now
                 if engine.master_auctions:
                     engine.run_cycle_step()
+
+            # Dynamic Page-by-Page Discovery & Pagination Navigation
+            try:
+                if home_page and not home_page.is_closed():
+                    if now - last_page_scan_time >= 2.0:
+                        last_page_scan_time = now
+                        navigator.scan_page_auction_ids(home_page)
+
+                    if navigator.is_page_fully_processed(engine):
+                        navigator.advance_pagination(home_page, engine)
+            except Exception:
+                pass
 
             try:
                 if context.pages:
