@@ -856,7 +856,7 @@
       </div>
       <div class="brand-text">
         <h1>GovAuctions Master Monitor</h1>
-        <p>Continuous 10-Tab Priority Rotation</p>
+        <p>Continuous 10-Slot Background Monitoring</p>
       </div>
     </div>
 
@@ -1221,7 +1221,7 @@
         let statusText = '⚪ WAITING';
         let statusClass = 'status-waiting';
         if (status === 'active') {
-          statusText = `🟢 ACTIVE${activeSlot ? ` (Tab ${activeSlot})` : ''}`;
+          statusText = `🟢 ACTIVE${activeSlot ? ` (Slot ${activeSlot})` : ''}`;
           statusClass = 'status-active';
         } else if (status === 'queued') {
           statusText = '🟡 QUEUED';

@@ -57,12 +57,13 @@ class AuctionQueueEngine:
     """
     def __init__(self, context=None, max_active=MAX_ACTIVE_AUCTIONS):
         self.context = context
+        self.monitor = None
         self.max_active = max_active
 
         self.master_auctions = {}       # aid (str) -> dict of full auction data (current session only)
         self.discovery_order = []       # list of aid in first-seen order
-        self.tab_pool = []              # list of up to max_active Playwright Page objects
-        self.active_batch = []          # list of up to 10 auction IDs currently open in tab_pool
+        self.tab_pool = []              # Replaced with invisible background workers
+        self.active_batch = []          # list of up to 10 auction IDs in active monitoring slots
         self.preview_next_batch = []    # list of top priority auction IDs queued for next batch
 
         self.last_static_refresh = "Waiting..."
@@ -73,6 +74,30 @@ class AuctionQueueEngine:
         # Pure in-memory session: Never load old data from past runs
     def set_context(self, context):
         self.context = context
+        self.cleanup_extra_tabs()
+
+    def set_monitor(self, monitor):
+        self.monitor = monitor
+
+    def cleanup_extra_tabs(self):
+        """
+        Ensures the 10 monitoring workers stay completely invisible:
+        Closes any leftover or visible gonzales.php tabs in the browser.
+        Only the main GovAuctions page and dashboard remain visible to the user.
+        """
+        if not self.context:
+            return
+        try:
+            pages = list(self.context.pages)
+            for p in pages:
+                try:
+                    url = (p.url or "").lower()
+                    if "gonzales.php" in url:
+                        p.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     @property
     def auction_queue(self):
@@ -228,32 +253,10 @@ class AuctionQueueEngine:
 
     def sync_tab_pool(self):
         """
-        Maintains exactly up to max_active (10) persistent Playwright browser tabs.
-        Reuses closed tabs if necessary.
+        Maintains invisible background monitoring:
+        Cleans up any stray visible gonzales.php tabs so the user's browser stays completely clean.
         """
-        if not self.context:
-            return
-
-        with self.lock:
-            valid_tabs = []
-            for tab in self.tab_pool:
-                try:
-                    if not tab.is_closed():
-                        valid_tabs.append(tab)
-                except Exception:
-                    pass
-            self.tab_pool = valid_tabs
-
-            needed = min(self.max_active, len(self.master_auctions)) - len(self.tab_pool)
-
-        for _ in range(needed):
-            try:
-                new_tab = self.context.new_page()
-                with self.lock:
-                    self.tab_pool.append(new_tab)
-            except Exception as e:
-                print(f"[!] Notice creating browser tab: {e}")
-                break
+        self.cleanup_extra_tabs()
 
     def compute_priority(self, aid, now):
         """
@@ -584,13 +587,13 @@ class AuctionQueueEngine:
         """
         Executes one continuous rotation cycle:
         1. Selects the next batch of up to 10 auctions according to priority.
-        2. Reuses tabs in self.tab_pool (navigating to each auction's gonzales.php URL).
-        3. Scrapes bid history, updates highest bid, appends unique bidders, updates timestamps.
+        2. Queries each auction's gonzales.php URL invisibly via context.request (0 visible browser tabs).
+        3. Scrapes bid history, updates highest bid, appends unique bidders, updates timestamps & bookmark status.
         4. Retains all existing data in master records (never deletes).
         5. Computes preview of next batch so dashboard shows QUEUED status.
-        6. Persists full master records to CSV & JSON.
+        6. Keeps all data in-memory for the live dashboard.
         """
-        self.sync_tab_pool()
+        self.cleanup_extra_tabs()
 
         with self.lock:
             if not self.master_auctions:
@@ -601,20 +604,33 @@ class AuctionQueueEngine:
             self.preview_next_batch = [aid for aid in self.select_next_batch(count=self.max_active * 2) if aid not in self.active_batch][:self.max_active]
             self.update_statuses_locked()
 
-            tabs_to_use = list(self.tab_pool[:len(self.active_batch)])
-
-        for slot_idx, aid in enumerate(target_batch):
-            if slot_idx >= len(tabs_to_use):
-                break
-            tab = tabs_to_use[slot_idx]
-            gonzales_url = f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}"
-            try:
-                if tab.is_closed():
-                    continue
-                tab.goto(gonzales_url, timeout=20000)
-                self.extract_tab_bid_history(aid, tab)
-            except Exception:
-                pass
+        if self.context and hasattr(self.context, "request") and self.context.request:
+            for slot_idx, aid in enumerate(target_batch):
+                gonzales_url = f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}"
+                try:
+                    resp = self.context.request.get(
+                        gonzales_url,
+                        headers={
+                            "Referer": GOVAUCTIONS_HOME_URL,
+                            "X-Requested-With": "XMLHttpRequest"
+                        },
+                        timeout=15000
+                    )
+                    if resp.status == 200:
+                        body = resp.text()
+                        if self.monitor:
+                            with self.monitor.lock:
+                                self.monitor.total_responses += 1
+                            if self.monitor.target and self.monitor.target in body.lower():
+                                idx = body.lower().find(self.monitor.target)
+                                start = max(0, idx - 40)
+                                end = min(len(body), idx + len(self.monitor.target) + 40)
+                                self.monitor.record_match(gonzales_url, "Response Body", snippet=body[start:end])
+                        if body.strip().startswith(("{", "[")):
+                            data = json.loads(body)
+                            self.process_gonzales_payload(data, default_aid=aid, raw_url=gonzales_url)
+                except Exception:
+                    pass
 
         with self.lock:
             self.cycle_count += 1
@@ -735,10 +751,10 @@ class AuctionQueueEngine:
         lines = []
         lines.append("\n" + "=" * 120)
         lines.append(f" MASTER AUCTION MONITOR TELEMETRY (Cycle #{self.cycle_count})")
-        lines.append(f" Total Discovered: {total} | Active Tabs: {len(active_ids)}/{self.max_active} | Queued Next: {len(next_ids)}")
+        lines.append(f" Total Discovered: {total} | Active Slots: {len(active_ids)}/{self.max_active} | Queued Next: {len(next_ids)}")
         lines.append(f" Last StaticData Refresh: {self.last_static_refresh} | Last Cycle: {self.last_cycle_time}")
         lines.append("-" * 120)
-        lines.append(f"{'Tab':<5} | {'Auction ID':<12} | {'Highest Bid':<12} | {'Bidders':<8} | {'Status':<16} | {'Product Name'}")
+        lines.append(f"{'Slot':<5} | {'Auction ID':<12} | {'Highest Bid':<12} | {'Bidders':<8} | {'Status':<16} | {'Product Name'}")
         lines.append("-" * 120)
         for idx, r in enumerate(cards, 1):
             aid = r.get("auctionId", "")
@@ -746,7 +762,7 @@ class AuctionQueueEngine:
             b_cnt = len(r.get("bidders", []))
             status = (r.get("status") or "ACTIVE").upper()
             name = (r.get("name") or f"Auction #{aid}")[:45]
-            lines.append(f"Tab {idx:<2} | {aid:<12} | {h_bid:<12} | {b_cnt:<8} | {status:<16} | {name}")
+            lines.append(f"Slot {idx:<2} | {aid:<12} | {h_bid:<12} | {b_cnt:<8} | {status:<16} | {name}")
         lines.append("=" * 120)
         if next_ids:
             lines.append(f" Next Rotation Batch: {next_ids}")
@@ -1314,6 +1330,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
     engine = AuctionQueueEngine(max_active=MAX_ACTIVE_AUCTIONS)
     navigator = PageNavigator(min_dwell_time=4.0, max_page_timeout=35.0)
     monitor = NetworkMonitor(engine=engine, target_keyword=TARGET_KEYWORD, navigator=navigator)
+    engine.set_monitor(monitor)
 
     # Start localhost dashboard
     server, dashboard_url = start_dashboard_server(engine, port=dashboard_port)
