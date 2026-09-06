@@ -133,12 +133,17 @@ class AuctionQueueEngine:
                         self.discovery_order.append(aid)
                     first_seen_order = self.discovery_order.index(aid) + 1
 
+                    bm_val = info.get("bookmarked") if isinstance(info, dict) else None
+                    is_bm = bool(bm_val is True or str(bm_val).lower() == "true" or bm_val == 1) if bm_val is not None else False
+
                     if aid in self.master_auctions:
                         rec = self.master_auctions[aid]
                         rec["name"] = name
                         if product_images:
                             rec["productImages"] = product_images
                             rec["primaryImage"] = primary_img
+                        if bm_val is not None and rec.get("bookmarked") != is_bm:
+                            rec["bookmarked"] = is_bm
                     else:
                         self.master_auctions[aid] = {
                             "auctionId": aid,
@@ -152,7 +157,7 @@ class AuctionQueueEngine:
                             "highestBid": 0.0,
                             "highestBidFormatted": "N/A",
                             "bidders": [],
-                            "bookmarked": False,
+                            "bookmarked": is_bm,
                             "status": "waiting",
                             "activeSlot": None,
                             "lastChecked": None,
@@ -325,18 +330,18 @@ class AuctionQueueEngine:
                 rec["activeSlot"] = None
             rec["active"] = (rec["status"] == "active")
 
-    def process_gonzales_history(self, aid, history_entries, bookmarked=None):
+    def process_gonzales_history(self, aid, history_entries=None, bookmarked=None, highest_bid=None, winner=None):
         """
-        Processes bid history for an auction:
-        - Updates highest bid if a higher bid is found.
-        - Merges new unique bidder usernames (no duplicates).
+        Processes bid history and bookmark state for an auction:
+        - Updates highest bid if a higher bid is found from history or highest_bid.
+        - Merges new unique bidder usernames (no duplicates) from history or winner.
         - Tracks lastChecked and lastUpdated timestamps.
         - Detects activity changes and updates lastBidChangeTime.
         - Records bookmarked status directly from gonzales.php response.
         """
         aid = str(aid).strip()
-        if not isinstance(history_entries, list):
-            history_entries = []
+        if not aid:
+            return
 
         now = time.time()
         now_str = time.strftime("%I:%M:%S %p").lstrip("0")
@@ -383,26 +388,44 @@ class AuctionQueueEngine:
                 if record.get("bookmarked") != is_bm:
                     record["bookmarked"] = is_bm
                     has_changed = True
+                    print(f" [*] [Bookmark Update] Auction #{aid} -> {'BOOKMARKED' if is_bm else 'UNBOOKMARKED'}")
 
-            for bid_entry in history_entries:
-                if not isinstance(bid_entry, list) or len(bid_entry) < 3:
-                    continue
-
-                # First value: Bid amount string e.g. "197.98"
+            if highest_bid is not None:
                 try:
-                    amt = float(bid_entry[0])
-                    if amt > record["highestBid"]:
-                        record["highestBid"] = amt
-                        record["highestBidFormatted"] = f"${amt:.2f}"
+                    h_amt = float(highest_bid)
+                    if h_amt > record.get("highestBid", 0.0):
+                        record["highestBid"] = h_amt
+                        record["highestBidFormatted"] = f"${h_amt:.2f}"
                         has_changed = True
                 except Exception:
                     pass
 
-                # Third value: Bidder username e.g. "Djpook"
-                name = str(bid_entry[2]).strip()
-                if name and name not in record["bidders"]:
-                    record["bidders"].append(name)
+            if winner:
+                w_str = str(winner).strip()
+                if w_str and w_str not in record["bidders"]:
+                    record["bidders"].append(w_str)
                     has_changed = True
+
+            if isinstance(history_entries, list):
+                for bid_entry in history_entries:
+                    if not isinstance(bid_entry, list) or len(bid_entry) < 3:
+                        continue
+
+                    # First value: Bid amount string e.g. "197.98"
+                    try:
+                        amt = float(bid_entry[0])
+                        if amt > record["highestBid"]:
+                            record["highestBid"] = amt
+                            record["highestBidFormatted"] = f"${amt:.2f}"
+                            has_changed = True
+                    except Exception:
+                        pass
+
+                    # Third value: Bidder username e.g. "Djpook"
+                    name = str(bid_entry[2]).strip()
+                    if name and name not in record["bidders"]:
+                        record["bidders"].append(name)
+                        has_changed = True
 
             if has_changed:
                 record["lastUpdated"] = now_str
@@ -412,6 +435,137 @@ class AuctionQueueEngine:
                 bm_label = " [BOOKMARKED]" if record.get("bookmarked") else ""
                 print(f" [Bid Update] Auction #{aid} | Highest: {record['highestBidFormatted']} | Bidders ({len(record['bidders'])}): [{bidders_display}]{bm_label}")
 
+    def process_gonzales_payload(self, data, default_aid=None, raw_url=None):
+        """
+        Parses all response variations from gonzales.php:
+        1. JSON keyed directly by auction ID (e.g. {"17236580": {"r": "191.21", "w": "user", "bookmarked": true}})
+        2. Combined responses with 'auctionsDetails' and keyed ID objects
+        3. Top-level bookmarked arrays/objects (e.g. {"bookmarked": [17236580]})
+        4. Array of auction detail objects
+        5. URL query params fallback (e.g. idlist=17236580 or auctionDetailsIds=17236580)
+        """
+        if not isinstance(data, (dict, list)):
+            return
+
+        url_aids = []
+        if raw_url:
+            try:
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                for q_key in ["auctionDetailsIds", "auctionDetailsIds[]", "idlist", "idlist[]", "auctionId", "id"]:
+                    for val in qs.get(q_key, []):
+                        for sub_id in str(val).split(","):
+                            s = sub_id.strip()
+                            if s and s not in url_aids:
+                                url_aids.append(s)
+            except Exception:
+                pass
+
+        if not default_aid and url_aids:
+            default_aid = url_aids[0]
+
+        updates_by_aid = {}
+
+        def get_or_create(aid_key):
+            aid_key = str(aid_key).strip()
+            if not aid_key:
+                return None
+            if aid_key not in updates_by_aid:
+                updates_by_aid[aid_key] = {
+                    "history": None,
+                    "bookmarked": None,
+                    "highest_bid": None,
+                    "winner": None
+                }
+            return updates_by_aid[aid_key]
+
+        # 1. Top-level bookmark lists or maps
+        if isinstance(data, dict):
+            for bm_field in ["bookmarked", "bookmarks", "bookmarkedAuctions"]:
+                bm_obj = data.get(bm_field)
+                if isinstance(bm_obj, list):
+                    for b_id in bm_obj:
+                        entry = get_or_create(b_id)
+                        if entry:
+                            entry["bookmarked"] = True
+                elif isinstance(bm_obj, dict):
+                    for b_id, is_bm in bm_obj.items():
+                        entry = get_or_create(b_id)
+                        if entry:
+                            entry["bookmarked"] = bool(is_bm is True or str(is_bm).lower() == "true" or is_bm == 1)
+                elif isinstance(bm_obj, (bool, int, str)) and default_aid:
+                    entry = get_or_create(default_aid)
+                    if entry:
+                        entry["bookmarked"] = bool(bm_obj is True or str(bm_obj).lower() == "true" or bm_obj == 1)
+
+        # 2. Dict keyed by auction IDs (e.g. {"17236580": {"bookmarked": true, "r": "191.21", ...}})
+        if isinstance(data, dict):
+            for k, v in data.items():
+                k_str = str(k).strip()
+                if k_str.isdigit() and isinstance(v, dict):
+                    entry = get_or_create(k_str)
+                    if entry:
+                        if "bookmarked" in v and v["bookmarked"] is not None:
+                            b_val = v["bookmarked"]
+                            entry["bookmarked"] = bool(b_val is True or str(b_val).lower() == "true" or b_val == 1)
+                        if "r" in v and v["r"] is not None:
+                            try:
+                                entry["highest_bid"] = float(v["r"])
+                            except Exception:
+                                pass
+                        if "w" in v and v["w"]:
+                            entry["winner"] = str(v["w"]).strip()
+
+        # 3. Process auctionsDetails
+        auctions_details = []
+        if isinstance(data, dict):
+            auctions_details = data.get("auctionsDetails", [])
+            if not auctions_details and ("auctionId" in data or "auction_id" in data):
+                auctions_details = [data]
+        elif isinstance(data, list):
+            auctions_details = data
+
+        if isinstance(auctions_details, list):
+            for idx, item in enumerate(auctions_details):
+                if not isinstance(item, dict):
+                    continue
+                item_aid = str(item.get("auctionId") or item.get("auction_id") or item.get("id") or "").strip()
+                if not item_aid and len(auctions_details) == 1 and default_aid:
+                    item_aid = str(default_aid).strip()
+                elif not item_aid and len(auctions_details) == 1 and len(url_aids) == 1:
+                    item_aid = url_aids[0]
+
+                if not item_aid:
+                    continue
+
+                entry = get_or_create(item_aid)
+                if entry:
+                    if "history" in item and isinstance(item["history"], list):
+                        entry["history"] = item["history"]
+                    if "bookmarked" in item and item["bookmarked"] is not None:
+                        b_val = item["bookmarked"]
+                        entry["bookmarked"] = bool(b_val is True or str(b_val).lower() == "true" or b_val == 1)
+
+        # 4. Fallback if single auction and top-level bookmarked boolean exists
+        if default_aid and isinstance(data, dict):
+            d_str = str(default_aid).strip()
+            if "bookmarked" in data and updates_by_aid.get(d_str, {}).get("bookmarked") is None:
+                b_val = data["bookmarked"]
+                if isinstance(b_val, (bool, int, str)):
+                    entry = get_or_create(d_str)
+                    if entry:
+                        entry["bookmarked"] = bool(b_val is True or str(b_val).lower() == "true" or b_val == 1)
+
+        # 5. Dispatch updates
+        for aid_key, updates in updates_by_aid.items():
+            self.process_gonzales_history(
+                aid=aid_key,
+                history_entries=updates["history"],
+                bookmarked=updates["bookmarked"],
+                highest_bid=updates["highest_bid"],
+                winner=updates["winner"]
+            )
+
     def extract_tab_bid_history(self, aid, page):
         """Reads raw JSON from tab and updates history and bookmark status."""
         try:
@@ -420,21 +574,9 @@ class AuctionQueueEngine:
                 if (pre) return pre.innerText;
                 return document.body ? document.body.innerText : '';
             }""")
-            if raw_text and raw_text.strip().startswith("{"):
+            if raw_text and raw_text.strip().startswith(("{", "[")):
                 data = json.loads(raw_text)
-                auctions_details = data.get("auctionsDetails", [])
-                if not auctions_details and isinstance(data, list):
-                    auctions_details = data
-                elif not auctions_details and isinstance(data, dict):
-                    if "auctionId" in data or "auction_id" in data:
-                        auctions_details = [data]
-
-                for item in auctions_details:
-                    item_id = str(item.get("auctionId") or item.get("auction_id") or "").strip()
-                    history = item.get("history", [])
-                    bm = item.get("bookmarked")
-                    if item_id:
-                        self.process_gonzales_history(item_id, history, bookmarked=bm)
+                self.process_gonzales_payload(data, default_aid=aid)
         except Exception:
             pass
 
@@ -1043,21 +1185,9 @@ class NetworkMonitor:
             if "gonzales.php" in url.lower():
                 try:
                     body = response.text()
-                    if "auctionsDetails" in body or '"history"' in body or '"bookmarked"' in body:
+                    if body.strip().startswith(("{", "[")):
                         data = json.loads(body)
-                        auctions_details = data.get("auctionsDetails", [])
-                        if not auctions_details and isinstance(data, list):
-                            auctions_details = data
-                        elif not auctions_details and isinstance(data, dict):
-                            if "auctionId" in data or "auction_id" in data:
-                                auctions_details = [data]
-
-                        for item in auctions_details:
-                            aid = str(item.get("auctionId") or item.get("auction_id") or "").strip()
-                            history = item.get("history", [])
-                            bm = item.get("bookmarked")
-                            if aid:
-                                self.engine.process_gonzales_history(aid, history, bookmarked=bm)
+                        self.engine.process_gonzales_payload(data, raw_url=url)
                 except Exception:
                     pass
 

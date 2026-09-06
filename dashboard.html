@@ -1033,7 +1033,7 @@
         else if (s === 'recently_checked') checkedCount++;
         else waitingCount++;
 
-        if (a.bookmarked === true) {
+        if (a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1) {
           bookmarkedCount++;
         }
 
@@ -1061,7 +1061,7 @@
         if (currentFilter === 'hot') {
           list = list.filter(a => (a.activityScore && a.activityScore > 0) || (a.lastBidChangeTime && (now - a.lastBidChangeTime) < 300));
         } else if (currentFilter === 'bookmarked') {
-          list = list.filter(a => a.bookmarked === true);
+          list = list.filter(a => a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1);
         } else {
           list = list.filter(a => (a.status || 'waiting') === currentFilter);
         }
@@ -1080,8 +1080,8 @@
       // Sort
       if (currentSort === 'bookmarked') {
         list.sort((a, b) => {
-          const aBm = a.bookmarked === true ? 0 : 1;
-          const bBm = b.bookmarked === true ? 0 : 1;
+          const aBm = (a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1) ? 0 : 1;
+          const bBm = (b.bookmarked === true || String(b.bookmarked).toLowerCase() === 'true' || b.bookmarked === 1) ? 0 : 1;
           if (aBm !== bBm) return aBm - bBm;
           const ordA = a.firstSeenOrder !== undefined ? a.firstSeenOrder : (a.discoveryIndex !== undefined ? a.discoveryIndex + 1 : 999999);
           const ordB = b.firstSeenOrder !== undefined ? b.firstSeenOrder : (b.discoveryIndex !== undefined ? b.discoveryIndex + 1 : 999999);
@@ -1231,7 +1231,7 @@
           statusClass = 'status-recently_checked';
         }
 
-        const isBookmarked = auction.bookmarked === true;
+        const isBookmarked = auction.bookmarked === true || String(auction.bookmarked).toLowerCase() === 'true' || auction.bookmarked === 1;
         let card = document.getElementById(`card-${aid}`);
         if (!card) {
           card = document.createElement('div');
