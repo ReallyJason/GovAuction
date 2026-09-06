@@ -16,9 +16,6 @@ GOVAUCTIONS_LOGIN_URL = "https://www.govauctions.com/login"
 GONZALES_BASE_URL = "https://www.govauctions.com/gonzales.php"
 
 CHROME_PROFILE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome_user_data"))
-MATCHES_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "network_matches.json"))
-ITEMS_CSV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "govauction_items.csv"))
-ITEMS_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "govauction_items.json"))
 DASHBOARD_HTML_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "dashboard.html"))
 
 TARGET_KEYWORD = "oneontopofyou"
@@ -58,13 +55,11 @@ class AuctionQueueEngine:
     - Distinguishes 4 auction statuses: ACTIVE, QUEUED, RECENTLY CHECKED, WAITING.
     - Feeds full master records and telemetry to localhost dashboard and CSV/JSON exports.
     """
-    def __init__(self, context=None, max_active=MAX_ACTIVE_AUCTIONS, csv_path=ITEMS_CSV_PATH, json_path=ITEMS_JSON_PATH):
+    def __init__(self, context=None, max_active=MAX_ACTIVE_AUCTIONS):
         self.context = context
         self.max_active = max_active
-        self.csv_path = csv_path
-        self.json_path = json_path
 
-        self.master_auctions = {}       # aid (str) -> dict of full auction data
+        self.master_auctions = {}       # aid (str) -> dict of full auction data (current session only)
         self.discovery_order = []       # list of aid in first-seen order
         self.tab_pool = []              # list of up to max_active Playwright Page objects
         self.active_batch = []          # list of up to 10 auction IDs currently open in tab_pool
@@ -75,8 +70,7 @@ class AuctionQueueEngine:
         self.cycle_count = 0
         self.lock = threading.Lock()
 
-        self.load_existing_records()
-
+        # Pure in-memory session: Never load old data from past runs
     def set_context(self, context):
         self.context = context
 
@@ -91,42 +85,6 @@ class AuctionQueueEngine:
     @property
     def auction_records(self):
         return self.master_auctions
-
-    def load_existing_records(self):
-        """Loads persistent records from disk on startup."""
-        if os.path.exists(self.json_path):
-            try:
-                with open(self.json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for item in data:
-                        aid = str(item.get("auctionId") or item.get("id") or "").strip()
-                        if aid:
-                            bidders = item.get("bidders") or []
-                            highest_bid = float(item.get("highestBid") or item.get("highest_bid_amount") or 0.0)
-                            formatted_bid = item.get("highestBidFormatted") or (f"${highest_bid:.2f}" if highest_bid > 0 else "N/A")
-                            self.master_auctions[aid] = {
-                                "auctionId": aid,
-                                "id": aid,
-                                "name": item.get("name") or f"Auction #{aid}",
-                                "productImages": item.get("productImages") or item.get("images") or [],
-                                "primaryImage": item.get("primaryImage") or item.get("image") or "",
-                                "highestBid": highest_bid,
-                                "highestBidFormatted": formatted_bid,
-                                "bidders": bidders,
-                                "status": "waiting",
-                                "activeSlot": None,
-                                "lastChecked": item.get("lastChecked"),
-                                "lastCheckedTime": float(item.get("lastCheckedTime") or 0.0),
-                                "lastUpdated": item.get("lastUpdated") or item.get("last_updated"),
-                                "lastBidChangeTime": float(item.get("lastBidChangeTime") or 0.0),
-                                "activityScore": int(item.get("activityScore") or 0),
-                                "checkCount": int(item.get("checkCount") or (1 if bidders or highest_bid > 0 else 0)),
-                                "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}"
-                            }
-                            if aid not in self.discovery_order:
-                                self.discovery_order.append(aid)
-            except Exception:
-                pass
 
     def process_static_data(self, data, raw_url=""):
         """
@@ -476,7 +434,7 @@ class AuctionQueueEngine:
             self.last_cycle_time = time.strftime("%I:%M:%S %p").lstrip("0")
             self.update_statuses_locked()
 
-        self.save_csv_and_json()
+        # Pure in-memory: no disk file writes
 
     def rotate_active_slot(self, aid=None):
         """Forces an immediate rotation to the next batch of auctions."""
@@ -561,53 +519,8 @@ class AuctionQueueEngine:
             }
 
     def save_csv_and_json(self):
-        """Persists all master auction records to CSV and JSON."""
-        with self.lock:
-            records = list(self.master_auctions.values())
-
-        # Save JSON
-        try:
-            with open(self.json_path, "w", encoding="utf-8") as f:
-                json.dump(records, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Notice saving JSON: {e}")
-
-        # Save CSV
-        try:
-            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Index",
-                    "Auction ID",
-                    "Product Name",
-                    "Status",
-                    "Active Slot",
-                    "Highest Bid",
-                    "Bidders",
-                    "Total Bidders",
-                    "Last Checked",
-                    "Last Updated",
-                    "Primary Image",
-                    "Gonzales URL"
-                ])
-                for idx, r in enumerate(records, 1):
-                    bidders_str = ", ".join(r.get("bidders", []))
-                    writer.writerow([
-                        idx,
-                        r.get("auctionId", ""),
-                        r.get("name", "N/A"),
-                        (r.get("status") or "WAITING").upper(),
-                        r.get("activeSlot") or "",
-                        r.get("highestBidFormatted", "N/A"),
-                        bidders_str,
-                        len(r.get("bidders", [])),
-                        r.get("lastChecked", "Never"),
-                        r.get("lastUpdated", "Never"),
-                        r.get("primaryImage", ""),
-                        r.get("gonzalesUrl", "")
-                    ])
-        except Exception as e:
-            print(f"Notice saving CSV: {e}")
+        """No-op: In-memory mode active. Data is not saved to disk."""
+        pass
 
     def get_summary_table(self):
         """Returns a formatted console table of active batch, queue, and stats."""
@@ -739,11 +652,7 @@ class NetworkMonitor:
                 print(f"     Snippet: {snippet[:150]}")
             print("!" * 75 + "\n")
 
-            try:
-                with open(MATCHES_JSON_PATH, "w", encoding="utf-8") as f:
-                    json.dump(self.matches, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
+            # In-memory only: matches stored in self.matches
 
     def on_response(self, response):
         """Inspects HTTP responses."""
@@ -838,7 +747,7 @@ class NetworkMonitor:
                     if m.get("snippet"):
                         print(f"   Context: ... {m['snippet']} ...")
                 print("-" * 75)
-                print(f" Matches saved to: {MATCHES_JSON_PATH}")
+                print(f" Matches held in-memory (disk saving disabled)")
             else:
                 print(f" >>> RESULT: False <<<")
                 print(f" (No network responses or WebSocket messages contained '{self.target}')")
@@ -1097,8 +1006,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                     print("Command: ", end="", flush=True)
 
                 elif cmd_clean.lower() == "save":
-                    engine.save_csv_and_json()
-                    print(f"\nSaved records to {engine.csv_path} and {engine.json_path}")
+                    print(f"\n[!] Disk saving is disabled. All current data is held purely in-memory.")
                     print("Command: ", end="", flush=True)
 
                 elif cmd_clean.lower() in ["help", "h", "?"]:
@@ -1109,7 +1017,6 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                     print("  dash             - Open localhost dashboard")
                     print("  home             - Reload GovAuctions home to refresh staticData")
                     print("  check            - Check keyword 'oneontopofyou' matches")
-                    print("  save             - Save CSV and JSON")
                     print("  q / exit         - Exit browser")
                     print("Command: ", end="", flush=True)
 

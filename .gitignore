@@ -1,5 +1,15 @@
+# Environment & Browser Profiles
 .venv/
 chrome_user_data/
 chrome_profile/
 __pycache__/
 *.log
+
+# Scraped Data Files (Pure in-memory only, no persistence)
+govauction_items.csv
+govauction_items.json
+network_matches.json
+*.csv
+*.json
+!package*.json
+!tsconfig*.json
