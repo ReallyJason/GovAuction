@@ -152,6 +152,7 @@ class AuctionQueueEngine:
                             "highestBid": 0.0,
                             "highestBidFormatted": "N/A",
                             "bidders": [],
+                            "bookmarked": False,
                             "status": "waiting",
                             "activeSlot": None,
                             "lastChecked": None,
@@ -191,6 +192,7 @@ class AuctionQueueEngine:
                                 "highestBid": 0.0,
                                 "highestBidFormatted": "N/A",
                                 "bidders": [],
+                                "bookmarked": False,
                                 "status": "waiting",
                                 "activeSlot": None,
                                 "lastChecked": None,
@@ -323,17 +325,18 @@ class AuctionQueueEngine:
                 rec["activeSlot"] = None
             rec["active"] = (rec["status"] == "active")
 
-    def process_gonzales_history(self, aid, history_entries):
+    def process_gonzales_history(self, aid, history_entries, bookmarked=None):
         """
         Processes bid history for an auction:
         - Updates highest bid if a higher bid is found.
         - Merges new unique bidder usernames (no duplicates).
         - Tracks lastChecked and lastUpdated timestamps.
         - Detects activity changes and updates lastBidChangeTime.
+        - Records bookmarked status directly from gonzales.php response.
         """
         aid = str(aid).strip()
         if not isinstance(history_entries, list):
-            return
+            history_entries = []
 
         now = time.time()
         now_str = time.strftime("%I:%M:%S %p").lstrip("0")
@@ -357,6 +360,7 @@ class AuctionQueueEngine:
                     "highestBid": 0.0,
                     "highestBidFormatted": "N/A",
                     "bidders": [],
+                    "bookmarked": bool(bookmarked is True or str(bookmarked).lower() == "true" or bookmarked == 1) if bookmarked is not None else False,
                     "status": "waiting",
                     "activeSlot": None,
                     "lastChecked": now_str,
@@ -373,6 +377,12 @@ class AuctionQueueEngine:
             record["lastChecked"] = now_str
             record["lastCheckedTime"] = now
             record["checkCount"] = record.get("checkCount", 0) + 1
+
+            if bookmarked is not None:
+                is_bm = bool(bookmarked is True or str(bookmarked).lower() == "true" or bookmarked == 1)
+                if record.get("bookmarked") != is_bm:
+                    record["bookmarked"] = is_bm
+                    has_changed = True
 
             for bid_entry in history_entries:
                 if not isinstance(bid_entry, list) or len(bid_entry) < 3:
@@ -399,10 +409,11 @@ class AuctionQueueEngine:
                 record["lastBidChangeTime"] = now
                 record["activityScore"] = record.get("activityScore", 0) + 1
                 bidders_display = ", ".join(record["bidders"][:4]) + (f" (+{len(record['bidders'])-4} more)" if len(record["bidders"]) > 4 else "")
-                print(f" [Bid Update] Auction #{aid} | Highest: {record['highestBidFormatted']} | Bidders ({len(record['bidders'])}): [{bidders_display}]")
+                bm_label = " [BOOKMARKED]" if record.get("bookmarked") else ""
+                print(f" [Bid Update] Auction #{aid} | Highest: {record['highestBidFormatted']} | Bidders ({len(record['bidders'])}): [{bidders_display}]{bm_label}")
 
     def extract_tab_bid_history(self, aid, page):
-        """Reads raw JSON from tab and updates history."""
+        """Reads raw JSON from tab and updates history and bookmark status."""
         try:
             raw_text = page.evaluate("""() => {
                 const pre = document.querySelector('pre');
@@ -412,11 +423,18 @@ class AuctionQueueEngine:
             if raw_text and raw_text.strip().startswith("{"):
                 data = json.loads(raw_text)
                 auctions_details = data.get("auctionsDetails", [])
+                if not auctions_details and isinstance(data, list):
+                    auctions_details = data
+                elif not auctions_details and isinstance(data, dict):
+                    if "auctionId" in data or "auction_id" in data:
+                        auctions_details = [data]
+
                 for item in auctions_details:
                     item_id = str(item.get("auctionId") or item.get("auction_id") or "").strip()
                     history = item.get("history", [])
+                    bm = item.get("bookmarked")
                     if item_id:
-                        self.process_gonzales_history(item_id, history)
+                        self.process_gonzales_history(item_id, history, bookmarked=bm)
         except Exception:
             pass
 
@@ -481,6 +499,7 @@ class AuctionQueueEngine:
                 c["discoveryIndex"] = disc_idx
                 c["firstSeenOrder"] = rec.get("firstSeenOrder") or (disc_idx + 1)
                 c["firstSeenTime"] = rec.get("firstSeenTime", 0.0)
+                c["bookmarked"] = bool(rec.get("bookmarked", False))
                 cards.append(c)
 
         if search:
@@ -491,11 +510,19 @@ class AuctionQueueEngine:
             sf = status_filter.lower()
             if sf == "hot":
                 cards = [c for c in cards if c.get("activityScore", 0) > 0 or (c.get("lastBidChangeTime", 0) > 0 and (time.time() - c["lastBidChangeTime"]) < 300)]
+            elif sf in ["bookmarked", "bookmark"]:
+                cards = [c for c in cards if c.get("bookmarked") is True]
             else:
                 cards = [c for c in cards if c.get("status") == sf]
 
         # Sorting
-        if sort_by in ["first_seen_asc", "first_seen", "oldest"]:
+        if sort_by in ["bookmarked", "bookmark", "bookmarked_first"]:
+            cards.sort(key=lambda c: (
+                0 if c.get("bookmarked") is True else 1,
+                c.get("firstSeenOrder", 0),
+                c.get("firstSeenTime", 0.0)
+            ))
+        elif sort_by in ["first_seen_asc", "first_seen", "oldest"]:
             cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)))
         elif sort_by in ["first_seen_desc", "newest_first_seen"]:
             cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)), reverse=True)
@@ -535,6 +562,7 @@ class AuctionQueueEngine:
             queued = len(self.preview_next_batch)
             recently_checked = sum(1 for c in self.master_auctions.values() if c.get("status") == "recently_checked")
             waiting = max(0, total - active - queued - recently_checked)
+            bookmarked_cnt = sum(1 for c in self.master_auctions.values() if c.get("bookmarked") is True)
 
             return {
                 "active_count": active,
@@ -542,6 +570,7 @@ class AuctionQueueEngine:
                 "queued_count": queued,
                 "recently_checked_count": recently_checked,
                 "waiting_count": waiting,
+                "bookmarked_count": bookmarked_cnt,
                 "last_static_refresh": self.last_static_refresh,
                 "last_cycle_time": self.last_cycle_time,
                 "cycle_count": self.cycle_count,
@@ -1014,14 +1043,21 @@ class NetworkMonitor:
             if "gonzales.php" in url.lower():
                 try:
                     body = response.text()
-                    if "auctionsDetails" in body:
+                    if "auctionsDetails" in body or '"history"' in body or '"bookmarked"' in body:
                         data = json.loads(body)
                         auctions_details = data.get("auctionsDetails", [])
+                        if not auctions_details and isinstance(data, list):
+                            auctions_details = data
+                        elif not auctions_details and isinstance(data, dict):
+                            if "auctionId" in data or "auction_id" in data:
+                                auctions_details = [data]
+
                         for item in auctions_details:
                             aid = str(item.get("auctionId") or item.get("auction_id") or "").strip()
                             history = item.get("history", [])
+                            bm = item.get("bookmarked")
                             if aid:
-                                self.engine.process_gonzales_history(aid, history)
+                                self.engine.process_gonzales_history(aid, history, bookmarked=bm)
                 except Exception:
                     pass
 
