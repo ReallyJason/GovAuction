@@ -114,54 +114,70 @@ class AuctionQueueEngine:
     def process_static_data(self, data, raw_url=""):
         """
         Reads both StaticData #1 and StaticData #2 (and repeated requests).
-        Extracts id, name, and images.productImages for ALL battles.
-        Adds brand-new auctions to master list without discarding existing ones.
-        Refreshes product metadata (name, images) for existing auctions.
+        Extracts id, name, images, and bookmarked status for ALL battles.
+        Handles GovAuctions static network file structure:
+          - data["static"]: {aid: {id, name, images, ...}} or list
+          - data["dynamic"]: {auctionsDetails: [{auctionId, bookmarked, ...}], auctions: [{auctionId, bookmarked, ...}], bookmarked: [...], ...}
+          - Top-level list or dict keyed by numeric IDs
+        Updates existing auctions dynamically and records new discoveries.
         """
         discovered_ids = []
         now = time.time()
         now_str = time.strftime("%I:%M:%S %p").lstrip("0")
 
         with self.lock:
-            items_to_check = []
+            # Clean up any accidental bad IDs like "dynamic" if present
+            for bad_id in ["dynamic", "static", "data"]:
+                if bad_id in self.master_auctions:
+                    del self.master_auctions[bad_id]
+                if bad_id in self.discovery_order:
+                    self.discovery_order.remove(bad_id)
+                if bad_id in self.active_batch:
+                    self.active_batch.remove(bad_id)
 
-            # Handle list of items
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        aid = str(item.get("id") or item.get("auctionId") or item.get("auction_id") or "").strip()
-                        if aid:
-                            items_to_check.append((aid, item))
+            updates_by_aid = {}
+            RESERVED_KEYS = {"dynamic", "static", "data", "p", "status", "results", "auctions", "items", "auctionsdetails", "none", "null", "bookmarked", "bookmarks", "favorites"}
 
-            # Handle dict of items (including nested wrappers)
-            elif isinstance(data, dict):
-                for wrapper_key in ["static", "auctions", "items", "data", "results"]:
-                    if wrapper_key in data:
-                        sub = data[wrapper_key]
-                        if isinstance(sub, dict):
-                            items_to_check.extend(sub.items())
-                        elif isinstance(sub, list):
-                            for item in sub:
-                                if isinstance(item, dict):
-                                    aid = str(item.get("id") or item.get("auctionId") or item.get("auction_id") or "").strip()
-                                    if aid:
-                                        items_to_check.append((aid, item))
+            def get_or_create_upd(aid):
+                aid_str = str(aid).strip()
+                if not aid_str or aid_str.lower() in RESERVED_KEYS:
+                    return None
+                if aid_str not in updates_by_aid:
+                    updates_by_aid[aid_str] = {
+                        "name": None,
+                        "productImages": [],
+                        "bookmarked": None
+                    }
+                return updates_by_aid[aid_str]
 
-                for k, v in data.items():
-                    if k not in ["static", "auctions", "items", "data", "results", "bookmarked", "bookmarks", "bookmarkedAuctions"] and isinstance(v, dict):
-                        items_to_check.append((k, v))
+            def extract_bookmark_val(d):
+                if not isinstance(d, dict):
+                    return None
+                for bm_k in ["bookmarked", "isBookmarked", "is_bookmarked", "bookmark", "favorite", "isFavorite"]:
+                    if bm_k in d and d[bm_k] is not None:
+                        val = d[bm_k]
+                        return bool(val is True or str(val).lower() == "true" or val == 1)
+                return None
 
-            for k, info in items_to_check:
-                if not isinstance(info, dict):
-                    continue
+            def process_candidate_dict(info_dict, key_fallback=None):
+                if not isinstance(info_dict, dict):
+                    return
+                raw_aid = info_dict.get("id") or info_dict.get("auctionId") or info_dict.get("auction_id") or info_dict.get("aid") or key_fallback
+                if not raw_aid:
+                    return
+                aid_str = str(raw_aid).strip()
+                if not aid_str or aid_str.lower() in RESERVED_KEYS:
+                    return
 
-                aid = str(info.get("id") or info.get("auctionId") or info.get("auction_id") or k).strip()
-                if not aid:
-                    continue
+                upd = get_or_create_upd(aid_str)
+                if not upd:
+                    return
 
-                name = info.get("name") or info.get("title") or f"Auction #{aid}"
+                nm = info_dict.get("name") or info_dict.get("title")
+                if nm and not upd["name"]:
+                    upd["name"] = str(nm).strip()
 
-                images_field = info.get("images", {})
+                images_field = info_dict.get("images", {})
                 product_images = []
                 if isinstance(images_field, dict):
                     product_images = images_field.get("productImages", [])
@@ -171,27 +187,133 @@ class AuctionQueueEngine:
                     product_images = []
 
                 if not product_images:
-                    single = info.get("image") or info.get("imageUrl")
+                    single = info_dict.get("image") or info_dict.get("imageUrl") or info_dict.get("primaryImage")
                     if single:
                         product_images = [single]
 
+                if product_images and not upd["productImages"]:
+                    upd["productImages"] = product_images
+
+                bm = extract_bookmark_val(info_dict)
+                if bm is not None:
+                    if upd["bookmarked"] is None or bm is True:
+                        upd["bookmarked"] = bm
+
+            def process_bookmark_list_or_map(bm_container):
+                if isinstance(bm_container, list):
+                    for b_id in bm_container:
+                        upd = get_or_create_upd(b_id)
+                        if upd:
+                            upd["bookmarked"] = True
+                elif isinstance(bm_container, dict):
+                    for b_id, b_state in bm_container.items():
+                        upd = get_or_create_upd(b_id)
+                        if upd:
+                            is_b = bool(b_state is True or str(b_state).lower() == "true" or b_state == 1)
+                            if upd["bookmarked"] is None or is_b is True:
+                                upd["bookmarked"] = is_b
+
+            # 1. If data is a list of auction objects
+            if isinstance(data, list):
+                for item in data:
+                    process_candidate_dict(item)
+
+            # 2. If data is a dict
+            elif isinstance(data, dict):
+                # 2a. Check data["static"]
+                if "static" in data:
+                    static_obj = data["static"]
+                    if isinstance(static_obj, dict):
+                        for k, v in static_obj.items():
+                            process_candidate_dict(v, key_fallback=k)
+                    elif isinstance(static_obj, list):
+                        for item in static_obj:
+                            process_candidate_dict(item)
+
+                # 2b. Check data["dynamic"]
+                if "dynamic" in data:
+                    dynamic_obj = data["dynamic"]
+                    if isinstance(dynamic_obj, dict):
+                        for sub_wrapper in ["auctionsDetails", "auctions", "items", "data", "results"]:
+                            sub_val = dynamic_obj.get(sub_wrapper)
+                            if isinstance(sub_val, list):
+                                for item in sub_val:
+                                    process_candidate_dict(item)
+                            elif isinstance(sub_val, dict):
+                                for k, v in sub_val.items():
+                                    process_candidate_dict(v, key_fallback=k)
+
+                        for bm_key in ["bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"]:
+                            if bm_key in dynamic_obj:
+                                process_bookmark_list_or_map(dynamic_obj[bm_key])
+
+                        for k, v in dynamic_obj.items():
+                            if k not in ["auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"] and isinstance(v, dict):
+                                process_candidate_dict(v, key_fallback=k)
+                    elif isinstance(dynamic_obj, list):
+                        for item in dynamic_obj:
+                            process_candidate_dict(item)
+
+                # 2c. Check top-level wrappers
+                for wrapper_key in ["auctionsDetails", "auctions", "items", "data", "results"]:
+                    if wrapper_key in data:
+                        sub_val = data[wrapper_key]
+                        if isinstance(sub_val, list):
+                            for item in sub_val:
+                                process_candidate_dict(item)
+                        elif isinstance(sub_val, dict):
+                            for k, v in sub_val.items():
+                                process_candidate_dict(v, key_fallback=k)
+
+                # 2d. Check top-level bookmark containers
+                for bm_list_key in ["bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"]:
+                    if bm_list_key in data:
+                        process_bookmark_list_or_map(data[bm_list_key])
+
+                # Check nested state / lastKnownIds if present
+                state_obj = data.get("state", data)
+                if isinstance(state_obj, dict):
+                    last_known = state_obj.get("lastKnownIds", {})
+                    if isinstance(last_known, dict):
+                        for fav_key in ["/my-auctions/favorites", "favorites", "bookmarks"]:
+                            if fav_key in last_known:
+                                process_bookmark_list_or_map(last_known[fav_key])
+
+                # 2e. Check numeric keys directly on data
+                for k, v in data.items():
+                    if k not in ["static", "dynamic", "auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites", "state"] and isinstance(v, dict):
+                        process_candidate_dict(v, key_fallback=k)
+
+            # 3. Check query parameters in URL
+            if raw_url:
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                for q_id in (qs.get("auctionIds[]", []) or qs.get("auctionIds", [])):
+                    q_str = str(q_id).strip()
+                    if q_str.isdigit():
+                        get_or_create_upd(q_str)
+
+            # 4. Apply updates to self.master_auctions
+            for aid, upd in updates_by_aid.items():
+                name = upd["name"] or f"Auction #{aid}"
+                product_images = upd["productImages"] or []
                 primary_img = product_images[0] if product_images else ""
+                
+                # If "bookmarked": true, consider bookmarked. If false or missing (None), consider False.
+                is_bm = (upd["bookmarked"] is True)
 
                 if aid not in self.discovery_order:
                     self.discovery_order.append(aid)
                 first_seen_order = self.discovery_order.index(aid) + 1
 
-                # Source of truth: Read "bookmarked" property directly from static network file entry
-                bm_val = info.get("bookmarked") if isinstance(info, dict) else None
-                is_bm = bool(bm_val is True or str(bm_val).lower() == "true" or bm_val == 1)
-
                 if aid in self.master_auctions:
                     rec = self.master_auctions[aid]
-                    rec["name"] = name
+                    if upd["name"]:
+                        rec["name"] = upd["name"]
                     if product_images:
                         rec["productImages"] = product_images
                         rec["primaryImage"] = primary_img
-                    if rec.get("bookmarked") != is_bm:
+                    if upd["bookmarked"] is not None and rec.get("bookmarked") != is_bm:
                         rec["bookmarked"] = is_bm
                         print(f" [*] [StaticData Bookmark] Auction #{aid} -> {'BOOKMARKED' if is_bm else 'NOT BOOKMARKED'}")
                 else:
@@ -224,59 +346,7 @@ class AuctionQueueEngine:
 
                 discovered_ids.append(aid)
 
-            # Check top-level bookmarks list/dict in static file if present
-            if isinstance(data, dict):
-                for bm_list_key in ["bookmarked", "bookmarks", "bookmarkedAuctions"]:
-                    if bm_list_key in data:
-                        val = data[bm_list_key]
-                        if isinstance(val, list):
-                            for b_id in val:
-                                b_aid = str(b_id).strip()
-                                if b_aid in self.master_auctions:
-                                    self.master_auctions[b_aid]["bookmarked"] = True
-                        elif isinstance(val, dict):
-                            for b_id, b_state in val.items():
-                                b_aid = str(b_id).strip()
-                                if b_aid in self.master_auctions:
-                                    self.master_auctions[b_aid]["bookmarked"] = bool(b_state is True or str(b_state).lower() == "true" or b_state == 1)
-
-            # Check query parameters in URL
-            if raw_url:
-                parsed = urlparse(raw_url)
-                qs = parse_qs(parsed.query)
-                for q_id in (qs.get("auctionIds[]", []) or qs.get("auctionIds", [])):
-                    q_id = str(q_id).strip()
-                    if q_id and q_id not in discovered_ids:
-                        discovered_ids.append(q_id)
-                        if q_id not in self.discovery_order:
-                            self.discovery_order.append(q_id)
-                        q_first_seen_order = self.discovery_order.index(q_id) + 1
-
-                        if q_id not in self.master_auctions:
-                            self.master_auctions[q_id] = {
-                                "auctionId": q_id,
-                                "id": q_id,
-                                "name": f"Auction #{q_id}",
-                                "firstSeenOrder": q_first_seen_order,
-                                "firstSeenTime": now,
-                                "firstSeenFormatted": now_str,
-                                "productImages": [],
-                                "primaryImage": "",
-                                "highestBid": 0.0,
-                                "highestBidFormatted": "N/A",
-                                "bidders": [],
-                                "bookmarked": False,
-                                "status": "waiting",
-                                "activeSlot": None,
-                                "lastChecked": None,
-                                "lastCheckedTime": 0.0,
-                                "lastUpdated": None,
-                                "lastBidChangeTime": 0.0,
-                                "activityScore": 0,
-                                "checkCount": 0,
-                                "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={q_id}&auctionDetailsIds={q_id}",
-                                "battleUrl": f"https://www.govauctions.com/battle/{q_id}"
-                            }
+            self.last_static_refresh = now_str
 
             new_count = 0
             for aid in discovered_ids:
@@ -1182,8 +1252,8 @@ class NetworkMonitor:
         try:
             url = response.url
 
-            # 1. Intercept staticData responses (both StaticData #1 & #2, extraStaticData, etc.)
-            if any(k in url.lower() for k in ["staticdata", "static_data", "static-data", "/auction/static"]):
+            # 1. Intercept staticData responses (StaticData #1, #2, extraStaticData, favorites/bookmarks feeds, etc.)
+            if any(k in url.lower() for k in ["staticdata", "static_data", "static-data", "/auction/static", "extrastatic", "my-auctions", "favorite", "bookmark"]):
                 try:
                     body = response.text()
                     if body.strip().startswith(("{", "[")):
