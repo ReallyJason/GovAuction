@@ -245,11 +245,53 @@ class DiscordNotifier:
 
         return num_named_bidders
 
+    def is_verified_and_queued(self, auction_data):
+        """
+        Determines if the auction has reached the verified and queued state:
+        1. Must NOT be 'Waiting for verification'.
+        2. Must be confirmed verified (checkCount > 0 and lastCheckedTime > 0, or verified is True).
+        3. Must be actually queued (queued is True, status in ['queued', 'active', 'recently_checked'] and status != 'waiting').
+        4. Must be eligible / not closed (s != 3, closed is not True).
+        """
+        if not isinstance(auction_data, dict):
+            return False
+
+        # 1. Check explicit verificationStatus
+        verif_status = str(auction_data.get("verificationStatus", "")).strip()
+        if verif_status.lower() in ["waiting for verification", "unverified"]:
+            return False
+
+        # 2. Check verified state (checkCount > 0 and lastCheckedTime > 0)
+        check_count = auction_data.get("checkCount", 0)
+        last_checked_time = auction_data.get("lastCheckedTime", 0) or 0
+        has_verified_flag = (auction_data.get("verified") is True)
+        is_verified = has_verified_flag or (check_count > 0 and last_checked_time > 0)
+        if not is_verified:
+            return False
+
+        # 3. Check queued state (must not be 'waiting' / unqueued)
+        status = str(auction_data.get("status", "")).strip().lower()
+        if status in ["waiting", "unverified", ""]:
+            return False
+
+        has_queued_flag = (auction_data.get("queued") is True)
+        is_queued = has_queued_flag or (status in ["queued", "active", "recently_checked"])
+        if not is_queued:
+            return False
+
+        # 4. Check closed state
+        if auction_data.get("closed") is True or auction_data.get("s") == 3:
+            return False
+
+        return True
+
     def is_qualifying_auction(self, auction_data):
         """
         Determines if an auction qualifies for the Discord alert:
-        1. Auction is bookmarked ("bookmarked": True).
-        2. Exactly 2 people bidding on that auction.
+        1. Auction exists and is bookmarked ("bookmarked": True).
+        2. Auction is verified/eligible (NOT "Waiting for verification", verified is True, checkCount > 0).
+        3. Auction has actually been queued (queued is True, status != "waiting").
+        4. Exactly 2 people bidding on that auction.
         """
         if not isinstance(auction_data, dict):
             return False
@@ -259,7 +301,11 @@ class DiscordNotifier:
         if not is_bookmarked:
             return False
 
-        # 2. Exactly 2 people bidding
+        # 2 & 3. Verified and Queued requirements
+        if not self.is_verified_and_queued(auction_data):
+            return False
+
+        # 4. Exactly 2 people bidding
         count = self.get_bidder_count(auction_data)
         return (count == 2)
 
@@ -267,6 +313,7 @@ class DiscordNotifier:
         """
         Evaluates an auction and sends a Discord alert if conditions are met:
         - Only monitors bookmarked auctions.
+        - Auction MUST be confirmed verified and queued (rejects 'Waiting for verification' and unqueued auctions).
         - Triggers when exactly 2 people are bidding.
         - Prevents duplicate spam while it remains at 2 bidders.
         - Resets tracking if bidder count changes to != 2, allowing a new alert if it returns to 2 bidders later.
@@ -278,9 +325,13 @@ class DiscordNotifier:
         if not aid:
             return False
 
+        # Core requirement 1: Only bookmarked auctions
         is_bookmarked = (auction_data.get("bookmarked") is True)
-        # Never send alerts for non-bookmarked auctions
         if not is_bookmarked:
+            return False
+
+        # Core requirement 2 & 3: Must be verified and actually queued
+        if not self.is_verified_and_queued(auction_data):
             return False
 
         bidder_count = self.get_bidder_count(auction_data)
@@ -293,9 +344,10 @@ class DiscordNotifier:
                     self.last_alert_auction = aid
 
                     name = str(auction_data.get("name") or f"Auction #{aid}").strip()
+                    status_desc = str(auction_data.get("status", "ACTIVE")).upper()
                     print(f"\n" + "!" * 75)
                     print(f" [DISCORD ALERT TRIGGERED] ONLY 2 PEOPLE BIDDING ON: {name} (Auction #{aid})")
-                    print(f"                           Bookmarked: True | Bidder Count: 2")
+                    print(f"                           Bookmarked: True | Status: {status_desc} (Verified/Queued) | Bidder Count: 2")
                     print("!" * 75 + "\n")
 
                     msg = self.build_alert_message(auction_data)

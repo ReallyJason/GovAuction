@@ -349,6 +349,9 @@ class AuctionQueueEngine:
                         "bidderCount": upd.get("bidder_count") or len(b_list),
                         "bookmarked": is_bm,
                         "status": "waiting",
+                        "queued": False,
+                        "verified": False,
+                        "verificationStatus": "Waiting for verification",
                         "activeSlot": None,
                         "lastChecked": None,
                         "lastCheckedTime": 0.0,
@@ -447,25 +450,33 @@ class AuctionQueueEngine:
 
     def update_statuses_locked(self):
         """
-        Updates each auction's status field:
-        - 'active': Currently in active_batch (loaded in Tab 1..10)
-        - 'queued': In preview_next_batch (scheduled for next cycle)
-        - 'recently_checked': Checked within last 5 minutes (or has bids)
-        - 'waiting': Awaiting turn
+        Updates each auction's status and verification/queued fields:
+        - 'active': Currently in active_batch (loaded in Tab 1..10) -> Queued: Yes
+        - 'queued': In preview_next_batch (scheduled for next cycle) -> Queued: Yes
+        - 'recently_checked': Checked within last 5 minutes (or has bids) -> Verified: Yes, Queued: Yes
+        - 'waiting': Awaiting turn -> Queued: No, Verification: Waiting for verification
         """
         now = time.time()
         for aid, rec in self.master_auctions.items():
+            is_verified = (rec.get("checkCount", 0) > 0 and (rec.get("lastCheckedTime") or 0) > 0)
+            rec["verified"] = is_verified
+            rec["verificationStatus"] = "Verified" if is_verified else "Waiting for verification"
+
             if aid in self.active_batch:
                 rec["status"] = "active"
+                rec["queued"] = True
                 rec["activeSlot"] = self.active_batch.index(aid) + 1
             elif aid in self.preview_next_batch:
                 rec["status"] = "queued"
+                rec["queued"] = True
                 rec["activeSlot"] = None
-            elif rec["lastCheckedTime"] > 0 and (now - rec["lastCheckedTime"]) < 300:
+            elif rec.get("lastCheckedTime", 0) > 0 and (now - rec["lastCheckedTime"]) < 300:
                 rec["status"] = "recently_checked"
+                rec["queued"] = True
                 rec["activeSlot"] = None
             else:
                 rec["status"] = "waiting"
+                rec["queued"] = False
                 rec["activeSlot"] = None
             rec["active"] = (rec["status"] == "active")
 
@@ -504,8 +515,12 @@ class AuctionQueueEngine:
                     "highestBid": 0.0,
                     "highestBidFormatted": "N/A",
                     "bidders": [],
+                    "bidderCount": 0,
                     "bookmarked": False,
-                    "status": "waiting",
+                    "status": "recently_checked",
+                    "queued": True,
+                    "verified": True,
+                    "verificationStatus": "Verified",
                     "activeSlot": None,
                     "lastChecked": now_str,
                     "lastCheckedTime": now,
@@ -521,6 +536,11 @@ class AuctionQueueEngine:
             record["lastChecked"] = now_str
             record["lastCheckedTime"] = now
             record["checkCount"] = record.get("checkCount", 0) + 1
+            record["verified"] = True
+            record["verificationStatus"] = "Verified"
+            record["queued"] = True
+            if record.get("status") == "waiting":
+                record["status"] = "recently_checked"
 
             if highest_bid is not None:
                 try:
@@ -1685,6 +1705,12 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                         "bookmarked": True,
                         "bidders": ["bidder1", "bidder2"],
                         "bidderCount": 2,
+                        "status": "active",
+                        "queued": True,
+                        "verified": True,
+                        "verificationStatus": "Verified",
+                        "checkCount": 1,
+                        "lastCheckedTime": time.time(),
                         "currentBid": "$99.99"
                     }
                     # Force remove 99999999 in case tested before so it can trigger

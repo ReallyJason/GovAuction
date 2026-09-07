@@ -924,10 +924,10 @@
           🟡 Queued <span class="filter-pill-count" id="count-queued">0</span>
         </button>
         <button class="filter-pill" data-filter="recently_checked" onclick="setFilter('recently_checked')">
-          🔵 Checked <span class="filter-pill-count" id="count-checked">0</span>
+          🔵 Verified <span class="filter-pill-count" id="count-checked">0</span>
         </button>
         <button class="filter-pill" data-filter="waiting" onclick="setFilter('waiting')">
-          ⚪ Waiting <span class="filter-pill-count" id="count-waiting">0</span>
+          ⚪ Waiting for Verification <span class="filter-pill-count" id="count-waiting">0</span>
         </button>
         <button class="filter-pill" data-filter="hot" onclick="setFilter('hot')">
           🔥 Hot Battles <span class="filter-pill-count" id="count-hot">0</span>
@@ -1218,7 +1218,7 @@
 
         const isBidUpdated = prev && prev.highestBid !== highestBid;
 
-        let statusText = '⚪ WAITING';
+        let statusText = '⚪ WAITING FOR VERIFICATION';
         let statusClass = 'status-waiting';
         if (status === 'active') {
           statusText = `🟢 ACTIVE${activeSlot ? ` (Slot ${activeSlot})` : ''}`;
@@ -1227,7 +1227,7 @@
           statusText = '🟡 QUEUED';
           statusClass = 'status-queued';
         } else if (status === 'recently_checked') {
-          statusText = '🔵 CHECKED';
+          statusText = '🔵 VERIFIED';
           statusClass = 'status-recently_checked';
         }
 
