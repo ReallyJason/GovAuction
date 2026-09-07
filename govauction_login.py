@@ -10,6 +10,7 @@ import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from discord_notifier import DiscordNotifier
 
 GOVAUCTIONS_HOME_URL = "https://www.govauctions.com/"
 GOVAUCTIONS_LOGIN_URL = "https://www.govauctions.com/login"
@@ -55,10 +56,11 @@ class AuctionQueueEngine:
     - Distinguishes 4 auction statuses: ACTIVE, QUEUED, RECENTLY CHECKED, WAITING.
     - Feeds full master records and telemetry to localhost dashboard and CSV/JSON exports.
     """
-    def __init__(self, context=None, max_active=MAX_ACTIVE_AUCTIONS):
+    def __init__(self, context=None, max_active=MAX_ACTIVE_AUCTIONS, discord_notifier=None):
         self.context = context
         self.monitor = None
         self.max_active = max_active
+        self.discord_notifier = discord_notifier if discord_notifier is not None else DiscordNotifier()
 
         self.master_auctions = {}       # aid (str) -> dict of full auction data (current session only)
         self.discovery_order = []       # list of aid in first-seen order
@@ -246,6 +248,11 @@ class AuctionQueueEngine:
                                                 pass
                                         if "w" in dyn_item and dyn_item["w"]:
                                             upd["winner"] = str(dyn_item["w"]).strip()
+                                        if "x" in dyn_item and dyn_item["x"] is not None:
+                                            try:
+                                                upd["bidder_count"] = int(dyn_item["x"])
+                                            except Exception:
+                                                pass
 
                 # Process additional static metadata wrappers if present (e.g. auctionsDetails)
                 if isinstance(dynamic_obj, dict):
@@ -311,6 +318,8 @@ class AuctionQueueEngine:
                     if product_images:
                         rec["productImages"] = product_images
                         rec["primaryImage"] = primary_img
+                    if upd.get("bidder_count") is not None:
+                        rec["bidderCount"] = upd["bidder_count"]
                     if upd.get("highest_bid") is not None:
                         h_val = upd["highest_bid"]
                         if h_val > rec.get("highestBid", 0.0):
@@ -321,6 +330,7 @@ class AuctionQueueEngine:
                     if rec.get("bookmarked") != is_bm:
                         rec["bookmarked"] = is_bm
                         print(f" [*] [StaticData Bookmark] Auction #{aid} -> {'BOOKMARKED' if is_bm else 'NOT BOOKMARKED'}")
+                    target_rec = rec
                 else:
                     h_amt = upd.get("highest_bid", 0.0) or 0.0
                     b_list = [upd["winner"]] if upd.get("winner") else []
@@ -336,6 +346,7 @@ class AuctionQueueEngine:
                         "highestBid": h_amt,
                         "highestBidFormatted": f"${h_amt:,.2f}" if h_amt > 0 else "N/A",
                         "bidders": b_list,
+                        "bidderCount": upd.get("bidder_count") or len(b_list),
                         "bookmarked": is_bm,
                         "status": "waiting",
                         "activeSlot": None,
@@ -348,10 +359,15 @@ class AuctionQueueEngine:
                         "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}",
                         "battleUrl": f"https://www.govauctions.com/battle/{aid}"
                     }
+                    target_rec = self.master_auctions[aid]
                     if is_bm:
                         print(f" [*] [StaticData Bookmark] Auction #{aid} discovered as BOOKMARKED")
 
                 discovered_ids.append(aid)
+
+                # Check Discord alert eligibility for bookmarked auction with exactly 2 bidders
+                if self.discord_notifier:
+                    self.discord_notifier.check_auction(target_rec)
 
             self.last_static_refresh = now_str
 
@@ -544,12 +560,15 @@ class AuctionQueueEngine:
                         has_changed = True
 
             if has_changed:
+                record["bidderCount"] = max(record.get("bidderCount", 0), len(record["bidders"]))
                 record["lastUpdated"] = now_str
                 record["lastBidChangeTime"] = now
                 record["activityScore"] = record.get("activityScore", 0) + 1
                 bidders_display = ", ".join(record["bidders"][:4]) + (f" (+{len(record['bidders'])-4} more)" if len(record["bidders"]) > 4 else "")
                 bm_label = " [BOOKMARKED]" if record.get("bookmarked") else ""
                 print(f" [Bid Update] Auction #{aid} | Highest: {record['highestBidFormatted']} | Bidders ({len(record['bidders'])}): [{bidders_display}]{bm_label}")
+                if self.discord_notifier:
+                    self.discord_notifier.check_auction(record)
 
     def process_gonzales_payload(self, data, default_aid=None, raw_url=None):
         """
@@ -795,6 +814,7 @@ class AuctionQueueEngine:
             recently_checked = sum(1 for c in self.master_auctions.values() if c.get("status") == "recently_checked")
             waiting = max(0, total - active - queued - recently_checked)
             bookmarked_cnt = sum(1 for c in self.master_auctions.values() if c.get("bookmarked") is True)
+            discord_st = self.discord_notifier.get_status_info() if self.discord_notifier else {}
 
             return {
                 "active_count": active,
@@ -803,6 +823,9 @@ class AuctionQueueEngine:
                 "recently_checked_count": recently_checked,
                 "waiting_count": waiting,
                 "bookmarked_count": bookmarked_cnt,
+                "discord_configured": bool(discord_st.get("configured")),
+                "discord_alerts_sent": discord_st.get("total_alerts_sent", 0),
+                "discord_method": discord_st.get("method", "Unconfigured"),
                 "last_static_refresh": self.last_static_refresh,
                 "last_cycle_time": self.last_cycle_time,
                 "cycle_count": self.cycle_count,
@@ -1415,6 +1438,11 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
     print("=" * 75)
     print("      GOVAUCTIONS CONTINUOUS QUEUE MONITOR & DASHBOARD")
     print(" [*] Monitoring Mode: Page 1 Exclusive (all 10 slots focused on Page 1)")
+    discord_st = engine.discord_notifier.get_status_info() if engine.discord_notifier else {}
+    if discord_st.get("configured"):
+        print(f" [*] Discord Bot Alert: ACTIVE ({discord_st['method']}) | Alerting: 2 bidders on bookmarked")
+    else:
+        print(f" [*] Discord Bot Alert: STANDBY (copy discord_config.example.json -> discord_config.json)")
     if dashboard_url:
         print(f"      Localhost Dashboard: {dashboard_url}")
     print("=" * 75)
@@ -1637,12 +1665,45 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                     print(navigator.get_status_summary(engine))
                     print("Command: ", end="", flush=True)
 
+                elif cmd_clean.lower() in ["discord", "discord-status"]:
+                    print("\n" + "=" * 55)
+                    print("[*] Discord Bot Notifier Status:")
+                    print(f"    Configured : {engine.discord_notifier.is_configured()}")
+                    print(f"    Mode       : {engine.discord_notifier.delivery_method}")
+                    print(f"    Channel ID : {engine.discord_notifier.channel_id or 'None'}")
+                    print(f"    Ping Target: {engine.discord_notifier.ping_target} (x{engine.discord_notifier.repeat_pings})")
+                    print(f"    Alerts Sent: {engine.discord_notifier.alerts_sent}")
+                    print(f"    Active 2-Bidder Alerted IDs: {list(engine.discord_notifier.alerted_auction_ids)}")
+                    print("=" * 55)
+                    print("Command: ", end="", flush=True)
+
+                elif cmd_clean.lower() in ["discord-test", "test-discord"]:
+                    print("\n[*] Sending test alert via Discord...")
+                    test_sample = {
+                        "auctionId": 99999999,
+                        "name": "TEST ITEM - Discord Bot Verification",
+                        "bookmarked": True,
+                        "bidders": ["bidder1", "bidder2"],
+                        "bidderCount": 2,
+                        "currentBid": "$99.99"
+                    }
+                    # Force remove 99999999 in case tested before so it can trigger
+                    engine.discord_notifier.alerted_auction_ids.discard(99999999)
+                    queued = engine.discord_notifier.check_auction(test_sample)
+                    if queued:
+                        print("[+] Test alert queued successfully! Check your Discord channel.")
+                    else:
+                        print("[-] Could not queue test alert. Check configuration (discord_config.json).")
+                    print("Command: ", end="", flush=True)
+
                 elif cmd_clean.lower() in ["save"]:
                     print(f"\n[!] Disk saving is disabled. All current data is held purely in-memory.")
                     print("Command: ", end="", flush=True)
 
                 elif cmd_clean.lower() in ["help", "h", "?"]:
                     print("\nAvailable Commands:")
+                    print("  discord          - Check Discord bot alert status & configuration")
+                    print("  discord-test     - Send a sample 5-ping alert to Discord")
                     print("  queue            - View 10 active slots & waiting queue")
                     print("  page / p         - View pagination and page processing status")
                     print("  autopage         - Toggle automatic page patrol on/off (default: OFF, Page 1 exclusive)")

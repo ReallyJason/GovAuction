@@ -13,3 +13,7 @@ network_matches.json
 *.json
 !package*.json
 !tsconfig*.json
+!discord_config.example.json
+discord_config.json
+.env
+
