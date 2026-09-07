@@ -924,7 +924,8 @@ class PageNavigator:
        (e.g., 1 -> 2 -> 3 -> 2, or 1 -> 2 -> 3 -> 4 -> 5 -> 4).
     4. Navigates bidirectional sweep (patrol) smoothly across all available pages.
     """
-    def __init__(self, min_dwell_time=4.0, max_page_timeout=35.0):
+    def __init__(self, min_dwell_time=4.0, max_page_timeout=35.0, auto_paginate=False):
+        self.auto_paginate = auto_paginate
         self.current_page = 1
         self.direction = 1  # 1 for forward, -1 for backward
         self.page_start_time = time.time()
@@ -1206,8 +1207,10 @@ class PageNavigator:
             checked = sum(1 for a in aids if engine.master_auctions.get(a, {}).get("checkCount", 0) > 0)
         hist_str = " -> ".join(map(str, self.history[-10:]))
         dir_str = "Forward (+1)" if self.direction == 1 else "Backward (-1)"
+        mode_str = "Page 1 Exclusive (Auto-pagination OFF)" if not self.auto_paginate else "Multi-Page Patrol (Auto-pagination ON)"
         return (
             f"\n--- PAGINATION NAVIGATOR STATUS ---\n"
+            f" Monitoring Mode    : {mode_str}\n"
             f" Current Page       : Page {self.current_page}\n"
             f" Traversal Direction: {dir_str}\n"
             f" Page Auctions      : {checked}/{len(aids)} processed/checked\n"
@@ -1402,7 +1405,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
     """
     os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
     engine = AuctionQueueEngine(max_active=MAX_ACTIVE_AUCTIONS)
-    navigator = PageNavigator(min_dwell_time=4.0, max_page_timeout=35.0)
+    navigator = PageNavigator(min_dwell_time=4.0, max_page_timeout=35.0, auto_paginate=False)
     monitor = NetworkMonitor(engine=engine, target_keyword=TARGET_KEYWORD, navigator=navigator)
     engine.set_monitor(monitor)
 
@@ -1411,6 +1414,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
 
     print("=" * 75)
     print("      GOVAUCTIONS CONTINUOUS QUEUE MONITOR & DASHBOARD")
+    print(" [*] Monitoring Mode: Page 1 Exclusive (all 10 slots focused on Page 1)")
     if dashboard_url:
         print(f"      Localhost Dashboard: {dashboard_url}")
     print("=" * 75)
@@ -1619,7 +1623,21 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                     home_page.goto(GOVAUCTIONS_HOME_URL)
                     print("Command: ", end="", flush=True)
 
-                elif cmd_clean.lower() == "save":
+                elif cmd_clean.lower() in ["autopage", "auto-page", "toggle-page"]:
+                    navigator.auto_paginate = not navigator.auto_paginate
+                    status_str = "ENABLED (Multi-page patrol)" if navigator.auto_paginate else "DISABLED (Page 1 exclusive)"
+                    print(f"\n[*] Auto-Pagination is now: {status_str}")
+                    print("Command: ", end="", flush=True)
+
+                elif cmd_clean.lower() in ["p1", "page 1", "page1"]:
+                    print("\nReturning to Page 1...")
+                    navigator.click_page_button(home_page, 1)
+                    navigator.current_page = 1
+                    navigator.page_start_time = time.time()
+                    print(navigator.get_status_summary(engine))
+                    print("Command: ", end="", flush=True)
+
+                elif cmd_clean.lower() in ["save"]:
                     print(f"\n[!] Disk saving is disabled. All current data is held purely in-memory.")
                     print("Command: ", end="", flush=True)
 
@@ -1627,7 +1645,9 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                     print("\nAvailable Commands:")
                     print("  queue            - View 10 active slots & waiting queue")
                     print("  page / p         - View pagination and page processing status")
-                    print("  step / p-next    - Force advance to next pagination page")
+                    print("  autopage         - Toggle automatic page patrol on/off (default: OFF, Page 1 exclusive)")
+                    print("  step / p-next    - Manually force advance to next pagination page")
+                    print("  page 1           - Return immediately to Page 1")
                     print("  next / rotate    - Retire an active auction so next queued one steps in")
                     print("  poll / cycle     - Trigger an immediate cycle")
                     print("  dash             - Open localhost dashboard")
@@ -1657,7 +1677,7 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
                         last_page_scan_time = now
                         navigator.scan_page_auction_ids(home_page)
 
-                    if navigator.is_page_fully_processed(engine):
+                    if navigator.auto_paginate and navigator.is_page_fully_processed(engine):
                         navigator.advance_pagination(home_page, engine)
             except Exception:
                 pass
