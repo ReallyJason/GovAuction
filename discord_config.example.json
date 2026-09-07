@@ -2,7 +2,7 @@
   "bot_token": "YOUR_DISCORD_BOT_TOKEN_HERE",
   "channel_id": "YOUR_DISCORD_CHANNEL_ID_HERE",
   "webhook_url": "",
-  "ping_target": "@me",
+  "ping_target": "@everyone",
   "repeat_pings": 5,
   "enabled": true
 }
