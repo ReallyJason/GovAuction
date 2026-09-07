@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GovAuctions Master Monitor | Continuous Tab Rotation Dashboard</title>
+  <title>GovAuctions Bookmarked Monitor | Live Background Monitoring</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -855,8 +855,8 @@
         </svg>
       </div>
       <div class="brand-text">
-        <h1>GovAuctions Master Monitor</h1>
-        <p>Continuous 10-Slot Background Monitoring</p>
+        <h1>GovAuctions Bookmarked Monitor</h1>
+        <p>Continuous Background Monitoring for Bookmarked Auctions</p>
       </div>
     </div>
 
@@ -878,7 +878,7 @@
         <span class="status-metric-val active-val" id="metric-active">0 / 10</span>
       </div>
       <div class="status-metric">
-        <span class="status-metric-label">Total Discovered</span>
+        <span class="status-metric-label">Total Bookmarked</span>
         <span class="status-metric-val total-val" id="metric-total">0</span>
       </div>
       <div class="status-metric">
@@ -912,10 +912,7 @@
 
       <div class="filter-pills">
         <button class="filter-pill active" data-filter="all" onclick="setFilter('all')">
-          All <span class="filter-pill-count" id="count-all">0</span>
-        </button>
-        <button class="filter-pill" data-filter="bookmarked" onclick="setFilter('bookmarked')">
-          ⭐ Bookmarked <span class="filter-pill-count" id="count-bookmarked">0</span>
+          All Bookmarked <span class="filter-pill-count" id="count-all">0</span>
         </button>
         <button class="filter-pill" data-filter="active" onclick="setFilter('active')">
           🟢 Active <span class="filter-pill-count" id="count-active">0</span>
@@ -939,7 +936,6 @@
         <select id="sort-select" class="sort-select" onchange="onSortChange()">
           <option value="first_seen_asc">🕒 First Seen: Oldest → Newest (Default)</option>
           <option value="first_seen_desc">🕒 First Seen: Newest → Oldest</option>
-          <option value="bookmarked">⭐ Bookmarked</option>
           <option value="recent">⚡ Recently Checked / Updated</option>
           <option value="bid_high">Highest Bid ($ High to Low)</option>
           <option value="bidders">Most Bidders</option>
@@ -952,11 +948,11 @@
     <!-- Active Cards Section Header -->
     <div class="dashboard-header">
       <h2 class="section-title">
-        Master Auction List
+        Bookmarked Auction List
         <span class="count" id="filtered-count-badge">0</span>
       </h2>
       <div style="font-size: 0.85rem; color: var(--text-muted);" id="pagination-summary">
-        Displaying battles across rotation batches
+        Displaying bookmarked battles across rotation batches
       </div>
     </div>
 
@@ -964,8 +960,8 @@
     <div class="auction-grid" id="auction-grid">
       <div class="empty-state" id="loading-state">
         <div class="pulse-dot" style="margin: 0 auto 1.5rem; width: 14px; height: 14px;"></div>
-        <h3>Initializing Master Auction Engine...</h3>
-        <p>Waiting for staticData responses to discover battles. Once detected, the 10 browser tabs will rotate continuously and populate live cards.</p>
+        <h3>Initializing Bookmarked Auction Monitor...</h3>
+        <p>Waiting for staticData responses to discover bookmarked battles (dynamic.auctions[].bookmarked === true). Only bookmarked battles are loaded and monitored.</p>
       </div>
     </div>
 
@@ -1053,15 +1049,14 @@
     }
 
     function getFilteredAuctions() {
-      let list = [...masterAuctions];
+      // Exclusively process and display bookmarked auctions
+      let list = masterAuctions.filter(a => a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1);
       const now = Date.now() / 1000;
 
-      // Filter by status / hot / bookmarked
+      // Filter by status / hot
       if (currentFilter !== 'all') {
         if (currentFilter === 'hot') {
           list = list.filter(a => (a.activityScore && a.activityScore > 0) || (a.lastBidChangeTime && (now - a.lastBidChangeTime) < 300));
-        } else if (currentFilter === 'bookmarked') {
-          list = list.filter(a => a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1);
         } else {
           list = list.filter(a => (a.status || 'waiting') === currentFilter);
         }
@@ -1078,17 +1073,7 @@
       }
 
       // Sort
-      if (currentSort === 'bookmarked') {
-        list.sort((a, b) => {
-          const aBm = (a.bookmarked === true || String(a.bookmarked).toLowerCase() === 'true' || a.bookmarked === 1) ? 0 : 1;
-          const bBm = (b.bookmarked === true || String(b.bookmarked).toLowerCase() === 'true' || b.bookmarked === 1) ? 0 : 1;
-          if (aBm !== bBm) return aBm - bBm;
-          const ordA = a.firstSeenOrder !== undefined ? a.firstSeenOrder : (a.discoveryIndex !== undefined ? a.discoveryIndex + 1 : 999999);
-          const ordB = b.firstSeenOrder !== undefined ? b.firstSeenOrder : (b.discoveryIndex !== undefined ? b.discoveryIndex + 1 : 999999);
-          if (ordA !== ordB) return ordA - ordB;
-          return (a.firstSeenTime || 0) - (b.firstSeenTime || 0);
-        });
-      } else if (currentSort === 'first_seen_asc') {
+      if (currentSort === 'first_seen_asc') {
         list.sort((a, b) => {
           const ordA = a.firstSeenOrder !== undefined ? a.firstSeenOrder : (a.discoveryIndex !== undefined ? a.discoveryIndex + 1 : 999999);
           const ordB = b.firstSeenOrder !== undefined ? b.firstSeenOrder : (b.discoveryIndex !== undefined ? b.discoveryIndex + 1 : 999999);

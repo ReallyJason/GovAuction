@@ -116,12 +116,10 @@ class AuctionQueueEngine:
     def process_static_data(self, data, raw_url=""):
         """
         Reads both StaticData #1 and StaticData #2 (and repeated requests).
-        Extracts id, name, images, and bookmarked status for ALL battles.
-        Handles GovAuctions static network file structure:
-          - data["static"]: {aid: {id, name, images, ...}} or list
-          - data["dynamic"]: {auctionsDetails: [{auctionId, bookmarked, ...}], auctions: [{auctionId, bookmarked, ...}], bookmarked: [...], ...}
-          - Top-level list or dict keyed by numeric IDs
-        Updates existing auctions dynamically and records new discoveries.
+        Exclusively loads, processes, and displays bookmarked auctions:
+          Static network data -> dynamic.auctions[] -> Check bookmarked === true -> Process/display those auctions
+        Non-bookmarked auctions are completely discarded and never enter the processing,
+        monitoring, or UI pipeline.
         """
         discovered_ids = []
         now = time.time()
@@ -137,40 +135,77 @@ class AuctionQueueEngine:
                 if bad_id in self.active_batch:
                     self.active_batch.remove(bad_id)
 
-            updates_by_aid = {}
             RESERVED_KEYS = {"dynamic", "static", "data", "p", "status", "results", "auctions", "items", "auctionsdetails", "none", "null", "bookmarked", "bookmarks", "favorites"}
 
-            def get_or_create_upd(aid):
-                aid_str = str(aid).strip()
-                if not aid_str or aid_str.lower() in RESERVED_KEYS:
-                    return None
-                if aid_str not in updates_by_aid:
-                    updates_by_aid[aid_str] = {
-                        "name": None,
-                        "productImages": [],
-                        "bookmarked": None
-                    }
-                return updates_by_aid[aid_str]
+            # Step 1: Extract dynamic.auctions[] - Strict source of truth for bookmarks
+            dynamic_obj = data.get("dynamic") if isinstance(data, dict) else None
+            dyn_auctions = []
+            if isinstance(dynamic_obj, dict) and isinstance(dynamic_obj.get("auctions"), list):
+                dyn_auctions = dynamic_obj["auctions"]
+            elif isinstance(data, dict) and isinstance(data.get("auctions"), list):
+                dyn_auctions = data["auctions"]
+            elif isinstance(data, list):
+                dyn_auctions = data
 
-            def process_candidate_dict(info_dict, key_fallback=None):
-                if not isinstance(info_dict, dict):
-                    return
-                raw_aid = info_dict.get("i") or info_dict.get("id") or info_dict.get("auctionId") or info_dict.get("auction_id") or info_dict.get("aid") or key_fallback
-                if not raw_aid:
-                    return
-                aid_str = str(raw_aid).strip()
-                if not aid_str or aid_str.lower() in RESERVED_KEYS:
-                    return
+            bookmarked_dyn = {}
+            unbookmarked_ids = set()
 
-                upd = get_or_create_upd(aid_str)
-                if not upd:
+            if isinstance(dyn_auctions, list):
+                for dyn_item in dyn_auctions:
+                    if not isinstance(dyn_item, dict):
+                        continue
+                    raw_aid = dyn_item.get("i") or dyn_item.get("id") or dyn_item.get("auctionId")
+                    if raw_aid is None:
+                        continue
+                    aid_str = str(raw_aid).strip()
+                    if not aid_str or aid_str.lower() in RESERVED_KEYS:
+                        continue
+
+                    bm_val = dyn_item.get("bookmarked")
+                    is_bm = bool(bm_val is True or str(bm_val).lower() == "true" or bm_val == 1)
+                    if is_bm:
+                        bookmarked_dyn[aid_str] = dyn_item
+                    else:
+                        unbookmarked_ids.add(aid_str)
+
+            # Evict any auctions that are explicitly non-bookmarked from self.master_auctions
+            for uid in unbookmarked_ids:
+                if uid in self.master_auctions:
+                    del self.master_auctions[uid]
+                    if uid in self.discovery_order:
+                        self.discovery_order.remove(uid)
+                    if uid in self.active_batch:
+                        self.active_batch.remove(uid)
+                    if uid in self.preview_next_batch:
+                        self.preview_next_batch.remove(uid)
+                    print(f" [*] [StaticData Bookmark] Auction #{uid} unbookmarked -> Evicted from monitoring")
+
+            # Determine target bookmarked IDs that require processing
+            target_aids = set(bookmarked_dyn.keys())
+            for aid, rec in self.master_auctions.items():
+                if rec.get("bookmarked") is True:
+                    target_aids.add(aid)
+
+            if not target_aids:
+                self.last_static_refresh = now_str
+                self.update_statuses_locked()
+                return []
+
+            # Step 2: Extract static details (name, images) ONLY for target bookmarked IDs
+            static_info_by_aid = {}
+
+            def extract_static_for_aid(aid_str, candidate_dict):
+                if not isinstance(candidate_dict, dict):
                     return
+                if aid_str not in static_info_by_aid:
+                    static_info_by_aid[aid_str] = {"name": None, "productImages": []}
+                entry = static_info_by_aid[aid_str]
 
-                nm = info_dict.get("name") or info_dict.get("title")
-                if nm and not upd["name"]:
-                    upd["name"] = str(nm).strip()
+                nm = candidate_dict.get("name") or candidate_dict.get("title")
+                if nm and not entry["name"]:
+                    entry["name"] = str(nm).strip()
 
-                images_field = info_dict.get("images", {})
+                images_field = candidate_dict.get("images", {})
                 product_images = []
                 if isinstance(images_field, dict):
                     product_images = images_field.get("productImages", [])
@@ -180,132 +215,68 @@ class AuctionQueueEngine:
                     product_images = []
 
                 if not product_images:
-                    single = info_dict.get("image") or info_dict.get("imageUrl") or info_dict.get("primaryImage")
+                    single = candidate_dict.get("image") or candidate_dict.get("imageUrl") or candidate_dict.get("primaryImage")
                     if single:
                         product_images = [single]
 
-                if product_images and not upd["productImages"]:
-                    upd["productImages"] = product_images
+                if product_images and not entry["productImages"]:
+                    entry["productImages"] = product_images
 
-                if "r" in info_dict and info_dict["r"] is not None:
-                    try:
-                        upd["highest_bid"] = float(info_dict["r"])
-                    except Exception:
-                        pass
-                if "w" in info_dict and info_dict["w"]:
-                    upd["winner"] = str(info_dict["w"]).strip()
-                if "bookmarked" in info_dict and info_dict["bookmarked"] is not None:
-                    bm_val = info_dict["bookmarked"]
-                    upd["bookmarked"] = bool(bm_val is True or str(bm_val).lower() == "true" or bm_val == 1)
-
-            # 1. If data is a list of auction objects
-            if isinstance(data, list):
-                for item in data:
-                    process_candidate_dict(item)
-
-            # 2. If data is a dict
-            elif isinstance(data, dict):
-                # 2a. Check data["static"]
-                if "static" in data:
-                    static_obj = data["static"]
-                    if isinstance(static_obj, dict):
-                        for k, v in static_obj.items():
-                            process_candidate_dict(v, key_fallback=k)
-                    elif isinstance(static_obj, list):
-                        for item in static_obj:
-                            process_candidate_dict(item)
-
-                # 2b. Check data["dynamic"]["auctions"] - Strict source of truth for dynamic.auctions[].bookmarked
-                # Match auction using its existing auction ID ("i") and associate with dynamic.auctions[].bookmarked
-                dynamic_obj = data.get("dynamic")
-                dyn_auctions = []
-                if isinstance(dynamic_obj, dict) and isinstance(dynamic_obj.get("auctions"), list):
-                    dyn_auctions = dynamic_obj["auctions"]
-                elif isinstance(data.get("auctions"), list):
-                    dyn_auctions = data["auctions"]
-
-                if isinstance(dyn_auctions, list):
-                    for dyn_item in dyn_auctions:
-                        if isinstance(dyn_item, dict):
-                            raw_aid = dyn_item.get("i") or dyn_item.get("id") or dyn_item.get("auctionId")
-                            if raw_aid is not None:
-                                aid_str = str(raw_aid).strip()
-                                if aid_str and aid_str.lower() not in RESERVED_KEYS:
-                                    upd = get_or_create_upd(aid_str)
-                                    if upd:
-                                        # Source of truth: dynamic.auctions[].bookmarked
-                                        # True if "bookmarked": true, False if false or missing
-                                        bm_val = dyn_item.get("bookmarked")
-                                        if bm_val is True or str(bm_val).lower() == "true" or bm_val == 1:
-                                            upd["bookmarked"] = True
-                                        else:
-                                            upd["bookmarked"] = False
-
-                                        if "r" in dyn_item and dyn_item["r"] is not None:
-                                            try:
-                                                upd["highest_bid"] = float(dyn_item["r"])
-                                            except Exception:
-                                                pass
-                                        if "w" in dyn_item and dyn_item["w"]:
-                                            upd["winner"] = str(dyn_item["w"]).strip()
-                                        if "x" in dyn_item and dyn_item["x"] is not None:
-                                            try:
-                                                upd["bidder_count"] = int(dyn_item["x"])
-                                            except Exception:
-                                                pass
-
-                # Process additional static metadata wrappers if present (e.g. auctionsDetails)
-                if isinstance(dynamic_obj, dict):
-                    for sub_wrapper in ["auctionsDetails", "items", "data", "results"]:
-                        sub_val = dynamic_obj.get(sub_wrapper)
-                        if isinstance(sub_val, list):
-                            for item in sub_val:
-                                process_candidate_dict(item)
-                        elif isinstance(sub_val, dict):
-                            for k, v in sub_val.items():
-                                process_candidate_dict(v, key_fallback=k)
-
-                    for k, v in dynamic_obj.items():
-                        if k not in ["auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"] and isinstance(v, dict):
-                            process_candidate_dict(v, key_fallback=k)
+            if isinstance(data, dict):
+                static_obj = data.get("static")
+                if isinstance(static_obj, dict):
+                    for aid in target_aids:
+                        if aid in static_obj:
+                            extract_static_for_aid(aid, static_obj[aid])
+                elif isinstance(static_obj, list):
+                    for item in static_obj:
+                        if isinstance(item, dict):
+                            raw_id = str(item.get("id") or item.get("i") or item.get("auctionId") or "").strip()
+                            if raw_id in target_aids:
+                                extract_static_for_aid(raw_id, item)
 
                 for wrapper_key in ["auctionsDetails", "items", "data", "results"]:
-                    if wrapper_key in data:
-                        sub_val = data[wrapper_key]
-                        if isinstance(sub_val, list):
-                            for item in sub_val:
-                                process_candidate_dict(item)
-                        elif isinstance(sub_val, dict):
-                            for k, v in sub_val.items():
-                                process_candidate_dict(v, key_fallback=k)
+                    val = data.get(wrapper_key) or (dynamic_obj.get(wrapper_key) if isinstance(dynamic_obj, dict) else None)
+                    if isinstance(val, dict):
+                        for aid in target_aids:
+                            if aid in val:
+                                extract_static_for_aid(aid, val[aid])
+                    elif isinstance(val, list):
+                        for item in val:
+                            if isinstance(item, dict):
+                                raw_id = str(item.get("id") or item.get("i") or item.get("auctionId") or "").strip()
+                                if raw_id in target_aids:
+                                    extract_static_for_aid(raw_id, item)
 
-                # Check numeric keys directly on data
-                for k, v in data.items():
-                    if k not in ["static", "dynamic", "auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites", "state"] and isinstance(v, dict):
-                        process_candidate_dict(v, key_fallback=k)
+                for aid in target_aids:
+                    if aid in data and isinstance(data[aid], dict):
+                        extract_static_for_aid(aid, data[aid])
 
-            # 3. Check query parameters in URL
-            if raw_url:
-                parsed = urlparse(raw_url)
-                qs = parse_qs(parsed.query)
-                for q_id in (qs.get("auctionIds[]", []) or qs.get("auctionIds", [])):
-                    q_str = str(q_id).strip()
-                    if q_str.isdigit():
-                        get_or_create_upd(q_str)
-
-            # If bookmarked is missing or None, treat it as false
-            for aid, upd in updates_by_aid.items():
-                if upd["bookmarked"] is None:
-                    upd["bookmarked"] = False
-
-            # 4. Apply updates to self.master_auctions
-            for aid, upd in updates_by_aid.items():
-                name = upd["name"] or f"Auction #{aid}"
-                product_images = upd["productImages"] or []
+            # Step 3: Update or create records in self.master_auctions ONLY for bookmarked auctions
+            for aid in target_aids:
+                dyn_item = bookmarked_dyn.get(aid, {})
+                static_entry = static_info_by_aid.get(aid, {})
+                name = static_entry.get("name") or (dyn_item.get("name") or dyn_item.get("title") if isinstance(dyn_item, dict) else None)
+                product_images = static_entry.get("productImages") or []
                 primary_img = product_images[0] if product_images else ""
-                
-                # If "bookmarked": true, consider bookmarked. If false or missing, consider False.
-                is_bm = bool(upd["bookmarked"] is True)
+
+                highest_bid = None
+                winner = None
+                bidder_count = None
+
+                if isinstance(dyn_item, dict):
+                    if "r" in dyn_item and dyn_item["r"] is not None:
+                        try:
+                            highest_bid = float(dyn_item["r"])
+                        except Exception:
+                            pass
+                    if "w" in dyn_item and dyn_item["w"]:
+                        winner = str(dyn_item["w"]).strip()
+                    if "x" in dyn_item and dyn_item["x"] is not None:
+                        try:
+                            bidder_count = int(dyn_item["x"])
+                        except Exception:
+                            pass
 
                 if aid not in self.discovery_order:
                     self.discovery_order.append(aid)
@@ -313,31 +284,27 @@ class AuctionQueueEngine:
 
                 if aid in self.master_auctions:
                     rec = self.master_auctions[aid]
-                    if upd["name"]:
-                        rec["name"] = upd["name"]
+                    rec["bookmarked"] = True
+                    if name:
+                        rec["name"] = name
                     if product_images:
                         rec["productImages"] = product_images
                         rec["primaryImage"] = primary_img
-                    if upd.get("bidder_count") is not None:
-                        rec["bidderCount"] = upd["bidder_count"]
-                    if upd.get("highest_bid") is not None:
-                        h_val = upd["highest_bid"]
-                        if h_val > rec.get("highestBid", 0.0):
-                            rec["highestBid"] = h_val
-                            rec["highestBidFormatted"] = f"${h_val:,.2f}"
-                    if upd.get("winner") and upd["winner"] not in rec["bidders"]:
-                        rec["bidders"].append(upd["winner"])
-                    if rec.get("bookmarked") != is_bm:
-                        rec["bookmarked"] = is_bm
-                        print(f" [*] [StaticData Bookmark] Auction #{aid} -> {'BOOKMARKED' if is_bm else 'NOT BOOKMARKED'}")
+                    if bidder_count is not None:
+                        rec["bidderCount"] = bidder_count
+                    if highest_bid is not None and highest_bid > rec.get("highestBid", 0.0):
+                        rec["highestBid"] = highest_bid
+                        rec["highestBidFormatted"] = f"${highest_bid:,.2f}"
+                    if winner and winner not in rec["bidders"]:
+                        rec["bidders"].append(winner)
                     target_rec = rec
                 else:
-                    h_amt = upd.get("highest_bid", 0.0) or 0.0
-                    b_list = [upd["winner"]] if upd.get("winner") else []
+                    h_amt = highest_bid or 0.0
+                    b_list = [winner] if winner else []
                     self.master_auctions[aid] = {
                         "auctionId": aid,
                         "id": aid,
-                        "name": name,
+                        "name": name or f"Auction #{aid}",
                         "firstSeenOrder": first_seen_order,
                         "firstSeenTime": now,
                         "firstSeenFormatted": now_str,
@@ -346,8 +313,8 @@ class AuctionQueueEngine:
                         "highestBid": h_amt,
                         "highestBidFormatted": f"${h_amt:,.2f}" if h_amt > 0 else "N/A",
                         "bidders": b_list,
-                        "bidderCount": upd.get("bidder_count") or len(b_list),
-                        "bookmarked": is_bm,
+                        "bidderCount": bidder_count or len(b_list),
+                        "bookmarked": True,
                         "status": "waiting",
                         "queued": False,
                         "verified": False,
@@ -363,8 +330,7 @@ class AuctionQueueEngine:
                         "battleUrl": f"https://www.govauctions.com/battle/{aid}"
                     }
                     target_rec = self.master_auctions[aid]
-                    if is_bm:
-                        print(f" [*] [StaticData Bookmark] Auction #{aid} discovered as BOOKMARKED")
+                    print(f" [*] [StaticData Bookmark] Bookmarked Auction #{aid} loaded into queue: '{target_rec['name']}'")
 
                 discovered_ids.append(aid)
 
@@ -386,7 +352,7 @@ class AuctionQueueEngine:
             self.update_statuses_locked()
 
             if new_count > 0:
-                print(f"\n[+] [StaticData Refresh] Added {new_count} new battle(s). Total discovered: {len(self.master_auctions)}")
+                print(f"\n[+] [StaticData Refresh] Discovered {new_count} new bookmarked battle(s). Total bookmarked: {len(self.master_auctions)}")
 
             return discovered_ids
 
@@ -499,40 +465,14 @@ class AuctionQueueEngine:
 
         with self.lock:
             if aid not in self.master_auctions:
-                if aid not in self.discovery_order:
-                    self.discovery_order.append(aid)
-                first_seen_order = self.discovery_order.index(aid) + 1
-
-                self.master_auctions[aid] = {
-                    "auctionId": aid,
-                    "id": aid,
-                    "name": f"Auction #{aid}",
-                    "firstSeenOrder": first_seen_order,
-                    "firstSeenTime": now,
-                    "firstSeenFormatted": now_str,
-                    "productImages": [],
-                    "primaryImage": "",
-                    "highestBid": 0.0,
-                    "highestBidFormatted": "N/A",
-                    "bidders": [],
-                    "bidderCount": 0,
-                    "bookmarked": False,
-                    "status": "recently_checked",
-                    "queued": True,
-                    "verified": True,
-                    "verificationStatus": "Verified",
-                    "activeSlot": None,
-                    "lastChecked": now_str,
-                    "lastCheckedTime": now,
-                    "lastUpdated": None,
-                    "lastBidChangeTime": 0.0,
-                    "activityScore": 0,
-                    "checkCount": 0,
-                    "gonzalesUrl": f"{GONZALES_BASE_URL}?idlist={aid}&auctionDetailsIds={aid}",
-                    "battleUrl": f"https://www.govauctions.com/battle/{aid}"
-                }
+                # Do NOT create records or process history for non-bookmarked or unknown auctions
+                return
 
             record = self.master_auctions[aid]
+            if record.get("bookmarked") is not True:
+                # Strictly ignore non-bookmarked auctions
+                return
+
             record["lastChecked"] = now_str
             record["lastCheckedTime"] = now
             record["checkCount"] = record.get("checkCount", 0) + 1
@@ -758,19 +698,22 @@ class AuctionQueueEngine:
 
     def get_dashboard_cards(self, status_filter=None, search=None, sort_by=None):
         """
-        Returns all records from the master auction list.
+        Returns all bookmarked records from the master auction list.
         Supports filtering by status or search keyword, and custom sorting.
+        Operates strictly and exclusively on bookmarked auctions.
         """
         with self.lock:
             self.update_statuses_locked()
             cards = []
             for aid, rec in self.master_auctions.items():
+                if rec.get("bookmarked") is not True:
+                    continue
                 c = dict(rec)
                 disc_idx = self.discovery_order.index(aid) if aid in self.discovery_order else 0
                 c["discoveryIndex"] = disc_idx
                 c["firstSeenOrder"] = rec.get("firstSeenOrder") or (disc_idx + 1)
                 c["firstSeenTime"] = rec.get("firstSeenTime", 0.0)
-                c["bookmarked"] = bool(rec.get("bookmarked", False))
+                c["bookmarked"] = True
                 cards.append(c)
 
         if search:
@@ -782,18 +725,13 @@ class AuctionQueueEngine:
             if sf == "hot":
                 cards = [c for c in cards if c.get("activityScore", 0) > 0 or (c.get("lastBidChangeTime", 0) > 0 and (time.time() - c["lastBidChangeTime"]) < 300)]
             elif sf in ["bookmarked", "bookmark"]:
-                cards = [c for c in cards if c.get("bookmarked") is True]
+                # Everything in the list is already bookmarked
+                pass
             else:
                 cards = [c for c in cards if c.get("status") == sf]
 
-        # Sorting
-        if sort_by in ["bookmarked", "bookmark", "bookmarked_first"]:
-            cards.sort(key=lambda c: (
-                0 if c.get("bookmarked") is True else 1,
-                c.get("firstSeenOrder", 0),
-                c.get("firstSeenTime", 0.0)
-            ))
-        elif sort_by in ["first_seen_asc", "first_seen", "oldest"]:
+        # Sorting: operates exclusively on bookmarked auctions
+        if sort_by in ["first_seen_asc", "first_seen", "oldest"]:
             cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)))
         elif sort_by in ["first_seen_desc", "newest_first_seen"]:
             cards.sort(key=lambda c: (c.get("firstSeenOrder", 0), c.get("firstSeenTime", 0.0)), reverse=True)
@@ -828,17 +766,19 @@ class AuctionQueueEngine:
         """Returns telemetry stats for the dashboard header and console."""
         with self.lock:
             self.update_statuses_locked()
-            total = len(self.master_auctions)
-            active = len(self.active_batch)
-            queued = len(self.preview_next_batch)
-            recently_checked = sum(1 for c in self.master_auctions.values() if c.get("status") == "recently_checked")
+            bm_auctions = {k: v for k, v in self.master_auctions.items() if v.get("bookmarked") is True}
+            total = len(bm_auctions)
+            active = len([aid for aid in self.active_batch if aid in bm_auctions])
+            queued = len([aid for aid in self.preview_next_batch if aid in bm_auctions])
+            recently_checked = sum(1 for c in bm_auctions.values() if c.get("status") == "recently_checked")
             waiting = max(0, total - active - queued - recently_checked)
-            bookmarked_cnt = sum(1 for c in self.master_auctions.values() if c.get("bookmarked") is True)
+            bookmarked_cnt = total
             discord_st = self.discord_notifier.get_status_info() if self.discord_notifier else {}
 
             return {
                 "active_count": active,
                 "total_discovered": total,
+                "total_bookmarked": total,
                 "queued_count": queued,
                 "recently_checked_count": recently_checked,
                 "waiting_count": waiting,
@@ -849,8 +789,8 @@ class AuctionQueueEngine:
                 "last_static_refresh": self.last_static_refresh,
                 "last_cycle_time": self.last_cycle_time,
                 "cycle_count": self.cycle_count,
-                "active_slots": self.active_batch,
-                "next_slots": self.preview_next_batch
+                "active_slots": [aid for aid in self.active_batch if aid in bm_auctions],
+                "next_slots": [aid for aid in self.preview_next_batch if aid in bm_auctions]
             }
 
     def save_csv_and_json(self):
@@ -860,15 +800,16 @@ class AuctionQueueEngine:
     def get_summary_table(self):
         """Returns a formatted console table of active batch, queue, and stats."""
         with self.lock:
-            total = len(self.master_auctions)
-            active_ids = list(self.active_batch)
-            next_ids = list(self.preview_next_batch)
-            cards = [self.master_auctions[aid] for aid in active_ids if aid in self.master_auctions]
+            bm_auctions = {k: v for k, v in self.master_auctions.items() if v.get("bookmarked") is True}
+            total = len(bm_auctions)
+            active_ids = [aid for aid in self.active_batch if aid in bm_auctions]
+            next_ids = [aid for aid in self.preview_next_batch if aid in bm_auctions]
+            cards = [bm_auctions[aid] for aid in active_ids if aid in bm_auctions]
 
         lines = []
         lines.append("\n" + "=" * 120)
-        lines.append(f" MASTER AUCTION MONITOR TELEMETRY (Cycle #{self.cycle_count})")
-        lines.append(f" Total Discovered: {total} | Active Slots: {len(active_ids)}/{self.max_active} | Queued Next: {len(next_ids)}")
+        lines.append(f" BOOKMARKED AUCTION MONITOR TELEMETRY (Cycle #{self.cycle_count})")
+        lines.append(f" Total Bookmarked: {total} | Active Slots: {len(active_ids)}/{self.max_active} | Queued Next: {len(next_ids)}")
         lines.append(f" Last StaticData Refresh: {self.last_static_refresh} | Last Cycle: {self.last_cycle_time}")
         lines.append("-" * 120)
         lines.append(f"{'Slot':<5} | {'Auction ID':<12} | {'Highest Bid':<12} | {'Bidders':<8} | {'Status':<16} | {'Product Name'}")
@@ -1456,8 +1397,8 @@ def run_login(cli_username=None, cli_password=None, headless=False, cycle_interv
     server, dashboard_url = start_dashboard_server(engine, port=dashboard_port)
 
     print("=" * 75)
-    print("      GOVAUCTIONS CONTINUOUS QUEUE MONITOR & DASHBOARD")
-    print(" [*] Monitoring Mode: Page 1 Exclusive (all 10 slots focused on Page 1)")
+    print("      GOVAUCTIONS BOOKMARKED AUCTION MONITOR & DASHBOARD")
+    print(" [*] Monitoring Mode: Bookmarked Auctions Exclusive (dynamic.auctions[].bookmarked === true)")
     discord_st = engine.discord_notifier.get_status_info() if engine.discord_notifier else {}
     if discord_st.get("configured"):
         print(f" [*] Discord Bot Alert: ACTIVE ({discord_st['method']}) | Alerting: 2 bidders on bookmarked")
