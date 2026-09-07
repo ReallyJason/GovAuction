@@ -150,19 +150,10 @@ class AuctionQueueEngine:
                     }
                 return updates_by_aid[aid_str]
 
-            def extract_bookmark_val(d):
-                if not isinstance(d, dict):
-                    return None
-                for bm_k in ["bookmarked", "isBookmarked", "is_bookmarked", "bookmark", "favorite", "isFavorite"]:
-                    if bm_k in d and d[bm_k] is not None:
-                        val = d[bm_k]
-                        return bool(val is True or str(val).lower() == "true" or val == 1)
-                return None
-
             def process_candidate_dict(info_dict, key_fallback=None):
                 if not isinstance(info_dict, dict):
                     return
-                raw_aid = info_dict.get("id") or info_dict.get("auctionId") or info_dict.get("auction_id") or info_dict.get("aid") or key_fallback
+                raw_aid = info_dict.get("i") or info_dict.get("id") or info_dict.get("auctionId") or info_dict.get("auction_id") or info_dict.get("aid") or key_fallback
                 if not raw_aid:
                     return
                 aid_str = str(raw_aid).strip()
@@ -194,24 +185,16 @@ class AuctionQueueEngine:
                 if product_images and not upd["productImages"]:
                     upd["productImages"] = product_images
 
-                bm = extract_bookmark_val(info_dict)
-                if bm is not None:
-                    if upd["bookmarked"] is None or bm is True:
-                        upd["bookmarked"] = bm
-
-            def process_bookmark_list_or_map(bm_container):
-                if isinstance(bm_container, list):
-                    for b_id in bm_container:
-                        upd = get_or_create_upd(b_id)
-                        if upd:
-                            upd["bookmarked"] = True
-                elif isinstance(bm_container, dict):
-                    for b_id, b_state in bm_container.items():
-                        upd = get_or_create_upd(b_id)
-                        if upd:
-                            is_b = bool(b_state is True or str(b_state).lower() == "true" or b_state == 1)
-                            if upd["bookmarked"] is None or is_b is True:
-                                upd["bookmarked"] = is_b
+                if "r" in info_dict and info_dict["r"] is not None:
+                    try:
+                        upd["highest_bid"] = float(info_dict["r"])
+                    except Exception:
+                        pass
+                if "w" in info_dict and info_dict["w"]:
+                    upd["winner"] = str(info_dict["w"]).strip()
+                if "bookmarked" in info_dict and info_dict["bookmarked"] is not None:
+                    bm_val = info_dict["bookmarked"]
+                    upd["bookmarked"] = bool(bm_val is True or str(bm_val).lower() == "true" or bm_val == 1)
 
             # 1. If data is a list of auction objects
             if isinstance(data, list):
@@ -230,32 +213,56 @@ class AuctionQueueEngine:
                         for item in static_obj:
                             process_candidate_dict(item)
 
-                # 2b. Check data["dynamic"]
-                if "dynamic" in data:
-                    dynamic_obj = data["dynamic"]
-                    if isinstance(dynamic_obj, dict):
-                        for sub_wrapper in ["auctionsDetails", "auctions", "items", "data", "results"]:
-                            sub_val = dynamic_obj.get(sub_wrapper)
-                            if isinstance(sub_val, list):
-                                for item in sub_val:
-                                    process_candidate_dict(item)
-                            elif isinstance(sub_val, dict):
-                                for k, v in sub_val.items():
-                                    process_candidate_dict(v, key_fallback=k)
+                # 2b. Check data["dynamic"]["auctions"] - Strict source of truth for dynamic.auctions[].bookmarked
+                # Match auction using its existing auction ID ("i") and associate with dynamic.auctions[].bookmarked
+                dynamic_obj = data.get("dynamic")
+                dyn_auctions = []
+                if isinstance(dynamic_obj, dict) and isinstance(dynamic_obj.get("auctions"), list):
+                    dyn_auctions = dynamic_obj["auctions"]
+                elif isinstance(data.get("auctions"), list):
+                    dyn_auctions = data["auctions"]
 
-                        for bm_key in ["bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"]:
-                            if bm_key in dynamic_obj:
-                                process_bookmark_list_or_map(dynamic_obj[bm_key])
+                if isinstance(dyn_auctions, list):
+                    for dyn_item in dyn_auctions:
+                        if isinstance(dyn_item, dict):
+                            raw_aid = dyn_item.get("i") or dyn_item.get("id") or dyn_item.get("auctionId")
+                            if raw_aid is not None:
+                                aid_str = str(raw_aid).strip()
+                                if aid_str and aid_str.lower() not in RESERVED_KEYS:
+                                    upd = get_or_create_upd(aid_str)
+                                    if upd:
+                                        # Source of truth: dynamic.auctions[].bookmarked
+                                        # True if "bookmarked": true, False if false or missing
+                                        bm_val = dyn_item.get("bookmarked")
+                                        if bm_val is True or str(bm_val).lower() == "true" or bm_val == 1:
+                                            upd["bookmarked"] = True
+                                        else:
+                                            upd["bookmarked"] = False
 
-                        for k, v in dynamic_obj.items():
-                            if k not in ["auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"] and isinstance(v, dict):
+                                        if "r" in dyn_item and dyn_item["r"] is not None:
+                                            try:
+                                                upd["highest_bid"] = float(dyn_item["r"])
+                                            except Exception:
+                                                pass
+                                        if "w" in dyn_item and dyn_item["w"]:
+                                            upd["winner"] = str(dyn_item["w"]).strip()
+
+                # Process additional static metadata wrappers if present (e.g. auctionsDetails)
+                if isinstance(dynamic_obj, dict):
+                    for sub_wrapper in ["auctionsDetails", "items", "data", "results"]:
+                        sub_val = dynamic_obj.get(sub_wrapper)
+                        if isinstance(sub_val, list):
+                            for item in sub_val:
+                                process_candidate_dict(item)
+                        elif isinstance(sub_val, dict):
+                            for k, v in sub_val.items():
                                 process_candidate_dict(v, key_fallback=k)
-                    elif isinstance(dynamic_obj, list):
-                        for item in dynamic_obj:
-                            process_candidate_dict(item)
 
-                # 2c. Check top-level wrappers
-                for wrapper_key in ["auctionsDetails", "auctions", "items", "data", "results"]:
+                    for k, v in dynamic_obj.items():
+                        if k not in ["auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"] and isinstance(v, dict):
+                            process_candidate_dict(v, key_fallback=k)
+
+                for wrapper_key in ["auctionsDetails", "items", "data", "results"]:
                     if wrapper_key in data:
                         sub_val = data[wrapper_key]
                         if isinstance(sub_val, list):
@@ -265,21 +272,7 @@ class AuctionQueueEngine:
                             for k, v in sub_val.items():
                                 process_candidate_dict(v, key_fallback=k)
 
-                # 2d. Check top-level bookmark containers
-                for bm_list_key in ["bookmarked", "bookmarks", "bookmarkedAuctions", "favorites"]:
-                    if bm_list_key in data:
-                        process_bookmark_list_or_map(data[bm_list_key])
-
-                # Check nested state / lastKnownIds if present
-                state_obj = data.get("state", data)
-                if isinstance(state_obj, dict):
-                    last_known = state_obj.get("lastKnownIds", {})
-                    if isinstance(last_known, dict):
-                        for fav_key in ["/my-auctions/favorites", "favorites", "bookmarks"]:
-                            if fav_key in last_known:
-                                process_bookmark_list_or_map(last_known[fav_key])
-
-                # 2e. Check numeric keys directly on data
+                # Check numeric keys directly on data
                 for k, v in data.items():
                     if k not in ["static", "dynamic", "auctionsDetails", "auctions", "items", "data", "results", "p", "bookmarked", "bookmarks", "bookmarkedAuctions", "favorites", "state"] and isinstance(v, dict):
                         process_candidate_dict(v, key_fallback=k)
@@ -293,14 +286,19 @@ class AuctionQueueEngine:
                     if q_str.isdigit():
                         get_or_create_upd(q_str)
 
+            # If bookmarked is missing or None, treat it as false
+            for aid, upd in updates_by_aid.items():
+                if upd["bookmarked"] is None:
+                    upd["bookmarked"] = False
+
             # 4. Apply updates to self.master_auctions
             for aid, upd in updates_by_aid.items():
                 name = upd["name"] or f"Auction #{aid}"
                 product_images = upd["productImages"] or []
                 primary_img = product_images[0] if product_images else ""
                 
-                # If "bookmarked": true, consider bookmarked. If false or missing (None), consider False.
-                is_bm = (upd["bookmarked"] is True)
+                # If "bookmarked": true, consider bookmarked. If false or missing, consider False.
+                is_bm = bool(upd["bookmarked"] is True)
 
                 if aid not in self.discovery_order:
                     self.discovery_order.append(aid)
@@ -313,10 +311,19 @@ class AuctionQueueEngine:
                     if product_images:
                         rec["productImages"] = product_images
                         rec["primaryImage"] = primary_img
-                    if upd["bookmarked"] is not None and rec.get("bookmarked") != is_bm:
+                    if upd.get("highest_bid") is not None:
+                        h_val = upd["highest_bid"]
+                        if h_val > rec.get("highestBid", 0.0):
+                            rec["highestBid"] = h_val
+                            rec["highestBidFormatted"] = f"${h_val:,.2f}"
+                    if upd.get("winner") and upd["winner"] not in rec["bidders"]:
+                        rec["bidders"].append(upd["winner"])
+                    if rec.get("bookmarked") != is_bm:
                         rec["bookmarked"] = is_bm
                         print(f" [*] [StaticData Bookmark] Auction #{aid} -> {'BOOKMARKED' if is_bm else 'NOT BOOKMARKED'}")
                 else:
+                    h_amt = upd.get("highest_bid", 0.0) or 0.0
+                    b_list = [upd["winner"]] if upd.get("winner") else []
                     self.master_auctions[aid] = {
                         "auctionId": aid,
                         "id": aid,
@@ -326,9 +333,9 @@ class AuctionQueueEngine:
                         "firstSeenFormatted": now_str,
                         "productImages": product_images,
                         "primaryImage": primary_img,
-                        "highestBid": 0.0,
-                        "highestBidFormatted": "N/A",
-                        "bidders": [],
+                        "highestBid": h_amt,
+                        "highestBidFormatted": f"${h_amt:,.2f}" if h_amt > 0 else "N/A",
+                        "bidders": b_list,
                         "bookmarked": is_bm,
                         "status": "waiting",
                         "activeSlot": None,
