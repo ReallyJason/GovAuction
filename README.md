@@ -70,11 +70,19 @@ The web dashboard is served locally and refreshes dynamically every 1.2 seconds 
 
 ### How to Run
 
-Double-click [**`run_login.bat`**](file:///d:/MakingMoney/GovAuction/run_login.bat) or run from PowerShell:
+#### On macOS:
+* **Double-click** [`run_login.command`](file:///Users/jasonhu/MakingMoney/GovAuction/run_login.command) in Finder (equivalent to Windows `.bat`), or
+* Run from Terminal:
+  ```bash
+  ./run_login.sh
+  ```
 
-```powershell
-.\.venv\Scripts\python.exe govauction_login.py
-```
+#### On Windows:
+* **Double-click** [`run_login.bat`](file:///Users/jasonhu/MakingMoney/GovAuction/run_login.bat), or
+* Run from PowerShell:
+  ```powershell
+  .\.venv\Scripts\python.exe govauction_login.py
+  ```
 
 #### Optional CLI Arguments:
 * `--port 5000`: Port for localhost dashboard (default: `5000`).
